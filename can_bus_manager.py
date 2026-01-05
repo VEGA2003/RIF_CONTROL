@@ -70,7 +70,7 @@ class CANBusManager:
             self.bus.send(message)
         except Exception as e:
             print(f"Failed to send CAN message: {e}")
-    
+        
     def _receive_loop(self):
         """Main receive loop"""
         while self.running:
@@ -78,6 +78,8 @@ class CANBusManager:
                 message = self.bus.recv(timeout=0.1)
                 if message:
                     self._distribute_message(message)
+                    # print(bcolors.OKGREEN, message,len(message.data),  bcolors.ENDC)
+                    
             except Exception as e:
                 if self.running:
                     print(f"CAN receive error: {e}")

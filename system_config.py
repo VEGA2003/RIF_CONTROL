@@ -91,7 +91,9 @@ class ARS2108System:
         
         self.init_steps = self.set_init_steps()
         # Initialize CAN bus and managers
+        self.lock = threading.Lock()
         self.can_bus_manager = CANBusManager()
+        self.can_bus_manager.add_handler(self)
         self.sdo_manager = SDOStateMachine(self.can_bus_manager)
         self.current_velocity = 0
         self.control_mode = ControlMode.DISABLED
@@ -269,6 +271,59 @@ class ARS2108System:
         message = can.Message(arbitration_id=0x000, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
 
+    def can_handle_message(self, message: can.Message) -> bool:
+        """Check if this message belongs to this drive"""
+        cob_id = message.arbitration_id
+        # TPDO1 (0x180 + node_id) or TPDO2 (0x280 + node_id)
+        # return (cob_id == 0x180 + self.node_id or
+        #         cob_id == 0x280 + self.node_id)
+        return cob_id in [0x180 + self.node_id, 0x280 + self.node_id, 0x380 + self.node_id]
+        
+    def handle_message(self, message: can.Message):
+        """Handle CAN message for this drive"""
+        cob_id = message.arbitration_id
+
+        if cob_id == 0x180 + self.node_id:
+            # TPDO1: Status + Position
+            self._process_tpdo1(message.data)
+        elif cob_id == 0x280 + self.node_id:
+            # TPDO2: Velocity + Torque
+            self._process_tpdo2(message.data)
+        elif cob_id == 0x380 + self.node_id:
+            # TPDO2: Velocity + Torque
+            self._process_tpdo3(message.data)
+            
+    def _process_tpdo1(self, data: bytes):
+        """Process TPDO1 data (Status + Position)"""
+        if len(data) >= 6:
+            status_word, position = struct.unpack('<Hl', data[:6])
+            with self.lock:
+                self.status_word = status_word
+                self.position = position    
+            
+                
+    def _process_tpdo2(self, data: bytes):
+        """Process TPDO2 data (Velocity + Torque)"""
+        if len(data) >= 6:
+            velocity, torque = struct.unpack('<lH', data[:6])
+            with self.lock:
+                self.velocity = velocity
+                self.torque = torque
+        
+    def _process_tpdo3(self, data: bytes):
+        """Process TPDO2 data (Velocity + Torque)"""
+        if len(data) >= 6:
+            status_word, position = struct.unpack('<Hl', data[:6])
+            with self.lock:
+                self.status_word = status_word
+                self.position = position    
+                self.get_status()
+            print(bcolors.OKGREEN, format(status_word, 'b'), bcolors.ENDC)
+    def get_status(self):
+        if self.control_mode == ControlMode.POSITIONING:
+            if self.status_word & 0x1000 :
+                print(bcolors.OKGREEN, "setpoint acknowledged", bcolors.ENDC)
+
     def set_control_mode(self, mode: ControlMode):
         """Set control mode with proper state transitions"""
         if isinstance(mode, str):
@@ -374,14 +429,18 @@ class ARS2108System:
         
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
         
-    def set_position_sdo(self, position):
+    def set_position_sdo(self, position, now = False):
         if self.control_mode != ControlMode.POSITIONING: 
             self.set_control_mode(ControlMode.POSITIONING)
         
+        if now:
+            controlword = ControlWord.CHANGE_SET_IMMEDIATELY | ControlWord.NEW_SET_POINT
+        else:
+            controlword = ControlWord.NEW_SET_POINT
+        
         self.sdo_manager.write_sdo(self.node_id, 0x607A, 0x00, position, 4) 
-
         # Trigger with controlword via SDO
-        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x1F, 2)
+        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F | controlword, 2)
         time.sleep(0.05)
         self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2)
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
