@@ -9,6 +9,7 @@ from dataclasses import dataclass
 class SDOState(Enum):
     IDLE = auto()
     WAITING_RESPONSE = auto()
+    # WAITING = auto()
     COMPLETED = auto()
     ERROR = auto()
 

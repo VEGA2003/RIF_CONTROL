@@ -2,11 +2,11 @@ from typing import Dict, Optional, Callable, List, Tuple, Any
 from dataclasses import dataclass
 import can
 import struct
-from can_bus_manager import CANBusManager
-from sdo_state_machine import SDOStateMachine, SDORequest
+from can_bus_manager import CANBusManager, SyncManager
+from sdo_state_machine import SDOStateMachine, SDORequest, SDOState
 import threading
 import time
-from enum import Enum
+from enum import Enum, auto
 
 
 class bcolors:
@@ -52,52 +52,57 @@ class InitStep:
     nmt_command: Optional[int] = None
     delay: Optional[float] = None
     
-@dataclass
-class SDORequest:
-    node_id: int
-    index: int
-    subindex: int
-    value: int
-    size: int
-    timeout: float = 0.1
-    callback: Optional[Callable[[bool, Optional[int]], None]] = None
-    retry_count: int = 0
-    max_retries: int = 3
+    
+class DriveState(Enum):
+    """Drive state enumeration based on DS402 state machine"""
+    NOT_READY_TO_SWITCH_ON = 0
+    SWITCH_ON_DISABLED = 1
+    READY_TO_SWITCH_ON = 2
+    SWITCHED_ON = 3
+    OPERATION_ENABLED = 4
+    QUICK_STOP_ACTIVE = 5
+    FAULT_REACTION_ACTIVE = 6
+    FAULT = 7
+    TARGET_REACHED = 8
+    MOVING = 9
 
-
-
-def write_sdo(self, node_id: int, index: int, subindex: int, value: int, size: int,
-            timeout: float = 0.1, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
-    """Queue an SDO write request"""
-    request = SDORequest(node_id, index, subindex, value, size, timeout, callback)
-
-    with self.lock:
-        self.request_queue.append(request)
-        queue_length = len(self.request_queue)
-
-    print(
-        f"SDO request queued for node {node_id}, index 0x{index:04X}:{subindex:02X} (queue length: {queue_length})")
-    return True
-
-
+class StatusWord:
+    """DS402 Status Word bit definitions"""
+    READY_TO_SWITCH_ON = 0x01
+    SWITCHED_ON = 0x02
+    OPERATION_ENABLED = 0x04
+    FAULT = 0x08
+    VOLTAGE_ENABLED = 0x10
+    QUICK_STOP = 0x20
+    SWITCH_ON_DISABLED = 0x40
+    
+    
             
-            
-class ARS2108System:
+class ARS2108System():
     """Main system controller for ARS2108 servo drives with multiple control modes"""
 
-    def __init__(self, position_calc_func: Optional[Callable] = None):
+    def __init__(self, node_id, can_bus_manager=None ,position_calc_func: Optional[Callable] = None):
         self.velocity = 0
-        self.node_id = 1
-        
+
+        self.node_id = node_id
         self.init_steps = self.set_init_steps()
         # Initialize CAN bus and managers
+        # self.state
         self.lock = threading.Lock()
-        self.can_bus_manager = CANBusManager()
+        if can_bus_manager == None:
+            self.can_bus_manager = CANBusManager()
+            
+        else: 
+            self.can_bus_manager = can_bus_manager
+
         self.can_bus_manager.add_handler(self)
         self.sdo_manager = SDOStateMachine(self.can_bus_manager)
+        # self.sync_manager = SyncManager(self.can_bus_manager)
+        
         self.current_velocity = 0
         self.control_mode = ControlMode.DISABLED
         
+        self.state = DriveState.SWITCHED_ON
     
     def start(self):
         self.can_bus_manager.start()
@@ -318,11 +323,15 @@ class ARS2108System:
                 self.status_word = status_word
                 self.position = position    
                 self.get_status()
-            print(bcolors.OKGREEN, format(status_word, 'b'), bcolors.ENDC)
+            # print(bcolors.OKGREEN, format(status_word, 'b'), bcolors.ENDC)
     def get_status(self):
         if self.control_mode == ControlMode.POSITIONING:
             if self.status_word & 0x1000 :
                 print(bcolors.OKGREEN, "setpoint acknowledged", bcolors.ENDC)
+            if self.status_word & 0x0400 :
+                if self.state == DriveState.MOVING:
+                    print(bcolors.OKGREEN, "target reached", bcolors.ENDC)
+                    self.state = DriveState.TARGET_REACHED
 
     def set_control_mode(self, mode: ControlMode):
         """Set control mode with proper state transitions"""
@@ -400,19 +409,21 @@ class ARS2108System:
         print(bcolors.OKCYAN + f"Control mode set to {self.control_mode}" + bcolors.ENDC)
     
     def set_velocity(self, velocity):
+        self.velocity = velocity
         if self.control_mode != ControlMode.VELOCITY: 
             self.set_control_mode(ControlMode.VELOCITY)
         control_word = (ControlWord.ENABLE_VOLTAGE | ControlWord.QUICK_STOP |
                 ControlWord.SWITCH_ON | ControlWord.ENABLE_OPERATION)
-        data = struct.pack('<Hl', control_word, velocity)
+        data = struct.pack('<Hl', control_word, self.velocity)
         message = can.Message(arbitration_id=0x200 + 1, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
-        print(bcolors.OKBLUE + f"velocity set to {velocity}" + bcolors.ENDC)
+        print(bcolors.OKBLUE + f"velocity set to {self.velocity}" + bcolors.ENDC)
         
     def set_position(self, position):
         if self.control_mode != ControlMode.POSITIONING: 
             self.set_control_mode(ControlMode.POSITIONING)
-    
+
+        self.state = DriveState.MOVING
         control_word = (ControlWord.ENABLE_VOLTAGE | ControlWord.QUICK_STOP |ControlWord.SWITCH_ON | ControlWord.ENABLE_OPERATION | ControlWord.NEW_SET_POINT)
         data = struct.pack('<Hl', control_word, position)
         message = can.Message(arbitration_id=0x300 + 1, data=data, is_extended_id=False)
@@ -429,7 +440,7 @@ class ARS2108System:
         
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
         
-    def set_position_sdo(self, position, now = False):
+    def set_position_sdo(self, position, now = False, wait=None):
         if self.control_mode != ControlMode.POSITIONING: 
             self.set_control_mode(ControlMode.POSITIONING)
         
@@ -442,11 +453,17 @@ class ARS2108System:
         # Trigger with controlword via SDO
         self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F | controlword, 2)
         time.sleep(0.05)
-        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2)
+        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2, callback=self.moving)
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
+        
+    def moving(self, succes, error):
+        if succes:
+            self.state = DriveState.MOVING 
         
     def start_homing(self):
         self.set_control_mode(ControlMode.HOMING)
         
-    
-    
+    def reset_drive(self):
+        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F | ControlWord.FAULT_RESET, 2)
+
+

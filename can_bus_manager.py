@@ -95,3 +95,47 @@ class CANBusManager:
                     handler.handle_message(message)
             except Exception as e:
                 print(f"Handler error: {e}")
+
+
+class SyncManager:
+    """Manages SYNC messages"""
+
+    def __init__(self, can_bus_manager, sync_rate: float = 100.0):
+        self.can_bus_manager = can_bus_manager
+        self.sync_rate = sync_rate
+        self.running = False
+        self.sync_thread = None
+
+    def start(self):
+        """Start sending SYNC messages"""
+        self.running = True
+        self.sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
+        self.sync_thread.start()
+
+    def stop(self):
+        """Stop sending SYNC messages"""
+        self.running = False
+        if self.sync_thread:
+            self.sync_thread.join(timeout=1.0)
+
+    def _sync_loop(self):
+        """SYNC message loop"""
+        dt = 1.0 / self.sync_rate
+        next_time = time.time()
+
+        while self.running:
+            try:
+                # Send SYNC message
+                message = can.Message(arbitration_id=0x080, data=b'', is_extended_id=False)
+                self.can_bus_manager.send_message(message)
+
+                # Maintain sync rate
+                next_time += dt
+                sleep_time = next_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                else:
+                    next_time = time.time()
+
+            except Exception as e:
+                print(f"SYNC loop error: {e}")
