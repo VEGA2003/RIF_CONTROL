@@ -7,11 +7,15 @@ from system_config import ARS2108System, DriveState, bcolors
 from enum import Enum, auto
 import threading
 import time
+import datetime
 from typing import Optional, Callable, Dict, Any
 from dataclasses import dataclass
 from can_bus_manager import CANBusManager
+import adi
+import os
+import csv
 
-class TelescopeState(Enum):
+class DishState(Enum):
     IDLE = auto()
     WAITING_RESPONSE = auto()
     BUSY = auto()
@@ -27,27 +31,75 @@ class Task:
     
 
 
-
 class Telescope():
-    
-    def __init__(self, telescope_id):    
+    def __init__(self):    
         # default observing location is the Huygens building :)
-        self.telescope_id = telescope_id
-        self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
-        self.conversion_factor_alt = 0.001
-        self.alt_offset = 0
-        self.az_offset = 0
-        self.conversion_factor_az = 0.001
+        self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
         self.revolutions_to_increments = 6553600
+        self.earth_speed = 1000000
         
         self.lock = threading.Lock()
         self.can_bus_manager = CANBusManager()
         self.request_queue = []
-        self.drive_az = ARS2108System(self.telescope_id*2 + 1, self.can_bus_manager)
-        self.drive_alt = ARS2108System(self.telescope_id*2 + 2, self.can_bus_manager)
-        # self.drives = [self.drive_az, self.drive_alt]
-        self.drives = [self.drive_az]
-        self.state = TelescopeState.IDLE
+        # self.drives = [self.drive_RA, self.drive_DEC]
+        self.drives = [self.drive_RA]
+        self.state = DishState.IDLE
+        
+        self.receiver = Receiver()
+        
+
+class Receiver():
+    def __init__(self):   
+        self.sdr = adi.ad9361('ip:192.168.2.1')
+        self.sdr.rx_enabled_channels = [0, 1]
+        self.sdr.gain_control_mode_chan0 = 'manual'
+        self.sdr.gain_control_mode_chan1 = 'manual'
+        self.sdr.rx_hardwaregain_chan0 = 70.0 # dB
+        self.sdr.rx_hardwaregain_chan1 = 70.0 # dB
+        self.sdr.rx_lo = int(80e6) # Hz
+        self.sdr.sample_rate = int(1e6) # Hz
+        self.sdr.rx_rf_bandwidth = int(1e6) # filter width, just set it to the same as sample rate for now
+        self.sdr.rx_buffer_size = 10000
+        
+    def sample(self, output_path="output/data.csv"):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        if not os.path.exists(output_path):
+            with open(output_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile, delimiter=',')
+                writer.writerow(["time_stamp", "channel_0", "channel_1"])
+            
+        with open(output_path, 'a', newline='') as csvfile:
+            now = str(datetime.datetime.now().time())
+            writer = csv.writer(csvfile, delimiter=',')
+            row = [now]
+            sample = self.sdr.rx()
+            row.append(sample[0].tolist())
+            row.append(sample[1].tolist())
+            writer.writerow(row)
+        
+        
+
+class Dish():
+    
+    def __init__(self, dish_id):    
+        # default observing location is the Huygens building :)
+        self.dish_id = dish_id
+        self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
+        self.DEC_offset = 0
+        self.RA_offset = 0
+        self.conversion_factor_RA = 0.001
+        self.conversion_factor_DEC = 0.001
+        self.revolutions_to_increments = 6553600
+        self.earth_speed = 1000000
+        
+        self.lock = threading.Lock()
+        self.can_bus_manager = CANBusManager()
+        self.request_queue = []
+        self.drive_RA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
+        self.drive_DEC = ARS2108System(self.dish_id*2 + 2, self.can_bus_manager)
+        # self.drives = [self.drive_RA, self.drive_DEC]
+        self.drives = [self.drive_RA]
+        self.state = DishState.IDLE
 
         
     def start(self):
@@ -71,18 +123,18 @@ class Telescope():
         return posalt, posaz
         
     def move_to(self, ra: str , dec: str, pos=None):
-        posalt, posaz = self.coord_to_pos(ra, dec)
-        self.drive_alt.set_position_sdo(posalt)
-        self.drive_az.set_position_sdo(posaz)
-        while self.drive_alt.state != DriveState.TARGET_REACHED or self.drive_az.state !=  DriveState.TARGET_REACHED:
-            print(self.drive_alt.state, self.drive_az.state)
-        self.state = TelescopeState.IDLE
+        posDEC, posRA = self.coord_to_pos(ra, dec)
+        self.drive_DEC.set_position_sdo(posDEC)
+        self.drive_RA.set_position_sdo(posRA)
+        while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_RA.state !=  DriveState.TARGET_REACHED:
+            print(self.drive_DEC.state, self.drive_RA.state)
+        self.state = DishState.IDLE
         
     def set_position(self, drive, pos):
         drive.set_position_sdo(pos)
         while drive.state != DriveState.TARGET_REACHED:
             pass
-        self.state = TelescopeState.IDLE
+        self.state = DishState.IDLE
         
         
     def wait(self,wait_time):
@@ -90,8 +142,11 @@ class Telescope():
         time.sleep(wait_time)
         pass
     
+    def track(self):
+        self.drive_RA.set_velocity(self.earth_speed)
+    
     def add_task(self, action, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
-        """Queue a Telescope Task """
+        """Queue a dish Task """
         task = Task(action, callback)
 
         with self.lock:
@@ -99,7 +154,7 @@ class Telescope():
             queue_length = len(self.request_queue)
 
         print(
-            f"Telescope task queued for telelscope {self.telescope_id}, (queue length: {queue_length})")
+            f"dish task queued for dish {self.dish_id}, (queue length: {queue_length})")
         return True
 
     
@@ -111,7 +166,7 @@ class Telescope():
                     current_time = time.time()
                     
                     # Process next request if idle
-                    if self.state == TelescopeState.IDLE and self.request_queue:
+                    if self.state == DishState.IDLE and self.request_queue:
                         self.current_request = self.request_queue.pop(0)
                         print(
                             f"Processing SDO request for node {self.current_request.node_id}, index 0x{self.current_request.index:04X}:{self.current_request.subindex:02X}, value={self.current_request.value}")
@@ -127,13 +182,13 @@ class Telescope():
                 with self.lock:
                     if self.current_request:
                         self._complete_request(False, None)
-                    self.state = TelescopeState.IDLE
+                    self.state = DishState.IDLE
 
     def _send_current_request(self):
         """Send the current SDO request"""
         if not self.current_request:
             return
-        self.state = TelescopeState.BUSY
+        self.state = DishState.BUSY
         self.current_request.action()
         self.current_request.callback()
         print("request completed")
@@ -148,6 +203,6 @@ class Telescope():
     def is_busy(self) -> bool:
         """Check if the state machine is busy"""
         with self.lock:
-            return self.state != TelescopeState.IDLE or len(self.request_queue) > 0
+            return self.state != DishState.IDLE or len(self.request_queue) > 0
     
 
