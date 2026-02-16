@@ -117,7 +117,7 @@ class Dish():
         # coordAltAz = coord.transform_to(aa)
         coord = SkyCoord(ra, dec)
 
-        lst = t.sidereal_time('mean', longitude=self.observing_location)
+        lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
         ha = (lst - coord.ra).wrap_at(12*u.hourangle)
         
         posDEC = int(((coord.dec.value - self.dec_offset)*self.conversion_factor_DEC)*self.revolutions_to_increments)
