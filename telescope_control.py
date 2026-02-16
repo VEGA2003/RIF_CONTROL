@@ -41,8 +41,8 @@ class Telescope():
         self.lock = threading.Lock()
         self.can_bus_manager = CANBusManager()
         self.request_queue = []
-        # self.drives = [self.drive_RA, self.drive_DEC]
-        self.drives = [self.drive_RA]
+        # self.drives = [self.drive_HA, self.drive_DEC]
+        self.drives = [self.drive_HA]
         self.state = DishState.IDLE
         
         self.receiver = Receiver()
@@ -85,9 +85,9 @@ class Dish():
         # default observing location is the Huygens building :)
         self.dish_id = dish_id
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
-        self.DEC_offset = 0
-        self.RA_offset = 0
-        self.conversion_factor_RA = 0.001
+        self.dec_offset = 0
+        self.ha_offset = 0
+        self.conversion_factor_HA = 0.001
         self.conversion_factor_DEC = 0.001
         self.revolutions_to_increments = 6553600
         self.earth_speed = 1000000
@@ -95,10 +95,10 @@ class Dish():
         self.lock = threading.Lock()
         self.can_bus_manager = CANBusManager()
         self.request_queue = []
-        self.drive_RA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
+        self.drive_HA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
         self.drive_DEC = ARS2108System(self.dish_id*2 + 2, self.can_bus_manager)
-        # self.drives = [self.drive_RA, self.drive_DEC]
-        self.drives = [self.drive_RA]
+        # self.drives = [self.drive_HA, self.drive_DEC]
+        self.drives = [self.drive_HA]
         self.state = DishState.IDLE
 
         
@@ -113,21 +113,24 @@ class Dish():
         if observing_time == None:
             observing_time = Time(datetime.now())
         
-        aa = AltAz(location=self.observing_location, obstime=observing_time)
+        # aa = AltAz(location=self.observing_location, obstime=observing_time)
+        # coordAltAz = coord.transform_to(aa)
         coord = SkyCoord(ra, dec)
-        coordAltAz = coord.transform_to(aa)
+
+        lst = t.sidereal_time('mean', longitude=self.observing_location)
+        ha = (lst - coord.ra).wrap_at(12*u.hourangle)
         
-        posalt = int(((coordAltAz.alt.value - self.alt_offset)*self.conversion_factor_alt)*self.revolutions_to_increments)
-        posaz = int(((coordAltAz.az.value - self.az_offset)*self.conversion_factor_az)*self.revolutions_to_increments)
+        posDEC = int(((coord.dec.value - self.dec_offset)*self.conversion_factor_DEC)*self.revolutions_to_increments)
+        posHA = int(((ha.value - self.ha_offset)*self.conversion_factor_HA)*self.revolutions_to_increments)
         
-        return posalt, posaz
+        return posDEC, posHA
         
     def move_to(self, ra: str , dec: str, pos=None):
-        posDEC, posRA = self.coord_to_pos(ra, dec)
+        posDEC, posHA = self.coord_to_pos(ra, dec)
         self.drive_DEC.set_position_sdo(posDEC)
-        self.drive_RA.set_position_sdo(posRA)
-        while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_RA.state !=  DriveState.TARGET_REACHED:
-            print(self.drive_DEC.state, self.drive_RA.state)
+        self.drive_HA.set_position_sdo(posHA)
+        while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_HA.state !=  DriveState.TARGET_REACHED:
+            print(self.drive_DEC.state, self.drive_HA.state)
         self.state = DishState.IDLE
         
     def set_position(self, drive, pos):
@@ -143,7 +146,7 @@ class Dish():
         pass
     
     def track(self):
-        self.drive_RA.set_velocity(self.earth_speed)
+        self.drive_HA.set_velocity(self.earth_speed)
     
     def add_task(self, action, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a dish Task """
