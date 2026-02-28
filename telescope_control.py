@@ -81,7 +81,7 @@ class Telescope():
     def move_to(self, ra: str , dec: str, pos=None):
         self.dishes_in_position = 0
         for dish in self.dishes:
-            dish.add_task(dish.move_to(ra, dec))
+            dish.add_task(dish.move_to(ra, dec), self.move_to_followup)
         
     def move_to_followup(self):
         self.dishes_in_position += 1
