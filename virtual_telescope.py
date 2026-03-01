@@ -1,0 +1,410 @@
+from can_bus_manager import CANBusManager
+import can
+import time
+from system_config import ControlMode, ControlWord, bcolors, DriveState, StatusWord
+from dataclasses import dataclass
+import math
+
+class VirtualTelescope():
+    def __init__(self, num_devices): 
+        self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
+        self.devices = []
+        self.num_devices = num_devices
+        # Create 4 simulated drives
+        for node_id in range(self.num_devices):
+            dev = ARS2108Sim(node_id + 1, self.can_bus_manager)
+            self.devices.append(dev)
+
+        
+    def start(self):
+        # for device in self.devices:
+        #     device.start()
+        self.can_bus_manager.start()
+        print("Virtual telescope running...")
+
+
+class ARS2108Sim:
+    def __init__(self, node_id, can_bus_manager):
+        self.control_word = 0
+        self.status_word = 0x0040  # Switch on disabled
+        self.target_position = 0
+        self.actual_position = 0
+        self.mode = 1  # Profile Position
+        self.node_id = node_id
+        self.can_bus_manager = can_bus_manager
+        self.can_bus_manager.add_handler(self)
+        
+        # Control parameters - Keep high rate but make controller gentler
+        self.control_rate = 100.0  # Keep 100 Hz for good tracking
+
+        # PID controllers for each drive - VERY small gains with rate limiting
+        self.pid_controllers = {
+            1: PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0),  # Extremely small gain
+            2: PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0)  # Extremely small gain
+        }
+
+    # def start(self):
+    #     self.can_bus_manager.start()
+        
+    def write_object(self, index, subindex, value):
+        if index == 0x6040:
+            self.control_word = value
+            self._update_state_machine()
+
+        elif index == 0x607A:
+            self.target_position = value
+
+        elif index == 0x6060:
+            self.mode = value
+
+    def read_object(self, index, subindex):
+        if index == 0x6041:
+            return self.status_word
+
+        elif index == 0x6064:
+            return self.actual_position
+
+        elif index == 0x6061:
+            return self.mode
+
+        return 0
+
+    def _update_state_machine(self):
+        cw = self.control_word
+
+        if cw & 0x000F == 0x0006:
+            self.status_word = 0x0021  # Ready to switch on
+        elif cw & 0x000F == 0x0007:
+            self.status_word = 0x0023  # Switched on
+        elif cw & 0x000F == 0x000F:
+            self.status_word = 0x0027  # Operation enabled
+
+            # simulate motion
+            self.actual_position = self.target_position
+    
+        
+    def can_handle_message(self, message: can.Message) -> bool:
+        """Check if this message belongs to this drive"""
+        cob_id = message.arbitration_id
+        
+        
+        return cob_id % 16 == self.node_id
+        
+    def handle_message(self, message: can.Message):
+        """Handle CAN message for this drive"""
+        cob_id = message.arbitration_id
+        print(bcolors.OKBLUE, self, self.node_id, message,bcolors.ENDC)
+        # # NMT
+        # if cob_id == 0x000:
+        #     self.handle_nmt(message.data)
+
+        # SDO request
+        if 0x600 <= cob_id <= 0x67F:
+            self.handle_sdo(message)
+            
+    def handle_sdo(self, message):
+        data = message.data
+        cmd = data[0]
+        index = data[1] | (data[2] << 8)
+        sub = data[3]
+
+        # WRITE request
+        if cmd in (0x23, 0x2B, 0x2F):
+            value = int.from_bytes(data[4:8], "little")
+            self.write_object(index, sub, value)
+
+            # send SDO response
+            response_data = [0x60, data[1], data[2], sub, 0, 0, 0, 0]
+            response = can.Message(arbitration_id=0x580 + self.node_id, data=response_data, is_extended_id=False)
+            self.can_bus_manager.send_message(response)
+
+        # READ request
+        elif cmd == 0x40:
+            value = self.read_object(index, sub)
+            response = [0x43, data[1], data[2], sub] + \
+                    list(value.to_bytes(4, "little"))
+            response = can.Message(arbitration_id=0x580 + self.node_id, data=response_data, is_extended_id=False)
+            self.can_bus_manager.send_message(response)
+            
+            
+            
+    def set_position_sdo(self, position, now = False, wait=None):
+        if self.control_mode != ControlMode.POSITIONING: 
+            self.set_control_mode(ControlMode.POSITIONING)
+        
+        if now:
+            controlword = ControlWord.CHANGE_SET_IMMEDIATELY | ControlWord.NEW_SET_POINT
+        else:
+            controlword = ControlWord.NEW_SET_POINT
+        
+        self.sdo_manager.write_sdo(self.node_id, 0x607A, 0x00, position, 4) 
+        # Trigger with controlword via SDO
+        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F | controlword, 2)
+        time.sleep(0.05)
+        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2, callback=self.moving)
+        print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
+        
+
+
+@dataclass
+class PIDController:
+    """Rate-limited PID controller for high-frequency discrete control"""
+    kp: float = 0.1  # Very small proportional gain
+    ki: float = 0.0  # No integral initially
+    kd: float = 0.0  # No derivative initially
+    kv: float = 1.0  # Velocity feedforward gain
+
+    # Rate limiting (THE KEY TO STABILITY)
+    max_velocity_change: float = 500000.0  # 5 RPM change per 10ms cycle
+
+    # Internal state
+    integral: float = 0.0
+    last_error: float = 0.0
+    last_time: float = 0.0
+    last_output: float = 0.0
+
+    # Gentle filtering (not too aggressive)
+    error_history: list = None
+    output_history: list = None
+    filter_length: int = 3  # Light filtering
+
+    # Limits
+    output_limit: float = 10922666  # 100 RPM in increments/sec
+    integral_limit: float = 50000.0
+
+    # Dead zone to prevent hunting
+    dead_zone: float = 200.0
+
+    # Anti-windup parameters
+    anti_windup_gain: float = 1.0
+    enable_anti_windup: bool = True
+
+    # Velocity-based damping
+    velocity_damping: float = 0.005  # Very light damping
+
+    def __post_init__(self):
+        """Initialize history buffers"""
+        if self.error_history is None:
+            self.error_history = []
+        if self.output_history is None:
+            self.output_history = []
+
+    def reset(self):
+        """Reset controller state"""
+        self.integral = 0.0
+        self.last_error = 0.0
+        self.last_output = 0.0
+        self.last_time = time.time()
+        self.error_history.clear()
+        self.output_history.clear()
+
+    def update(self, desired_position: float, actual_position: float,
+               actual_velocity: float, desired_velocity: float = 0.0, dt: float = 0.01) -> float:
+        """
+        Update PID with debugging for 10-cycle bug detection
+        """
+        current_time = time.time()
+        if self.last_time == 0.0:
+            self.last_time = current_time
+            actual_dt = 0.01  # 100 Hz default
+        else:
+            actual_dt = current_time - self.last_time
+            self.last_time = current_time
+
+        # Check for timing anomalies that could cause spikes
+        if actual_dt > 0.02:  # More than 20ms between updates
+            print(f"WARNING: Large dt detected: {actual_dt * 1000:.1f}ms - could cause velocity spike")
+
+        # Position error
+        position_error = desired_position - actual_position
+
+        # Check for sudden large position error changes
+        if hasattr(self, 'last_position_error'):
+            error_change = abs(position_error - self.last_position_error)
+            if error_change > 1000000:  # Large position error change
+                print(f"WARNING: Large position error change: {error_change:.0f} counts")
+                print(f"  Previous error: {self.last_position_error:.0f}, Current error: {position_error:.0f}")
+        self.last_position_error = position_error
+
+        # Dead zone - don't control tiny errors
+        if abs(position_error) < self.dead_zone:
+            # Gradually decay output to zero when in dead zone
+            decay_factor = 0.95  # 5% decay per cycle
+            new_output = self.last_output * decay_factor
+
+            # Still apply rate limiting to decay
+            velocity_change = new_output - self.last_output
+            if abs(velocity_change) > self.max_velocity_change:
+                velocity_change = math.copysign(self.max_velocity_change, velocity_change)
+                new_output = self.last_output + velocity_change
+
+            self.last_output = new_output
+            return new_output
+
+        # Light filtering of error
+        self.error_history.append(position_error)
+        if len(self.error_history) > self.filter_length:
+            self.error_history.pop(0)
+
+        # Use lightly filtered error
+        if len(self.error_history) >= self.filter_length:
+            filtered_error = sum(self.error_history) / len(self.error_history)
+        else:
+            filtered_error = position_error
+
+        # Proportional term (use filtered error to reduce noise)
+        p_term = self.kp * filtered_error
+
+        # Check for large P term that could cause spikes
+        p_term_rpm = p_term / 109226.67
+        if abs(p_term_rpm) > 20:
+            print(f"WARNING: Large P term: {p_term_rpm:.1f} RPM from error {filtered_error:.0f}")
+
+        # Derivative term (only if Kd > 0 and we have history)
+        d_term = 0.0
+        if self.kd > 0 and len(self.error_history) >= 2 and actual_dt > 0:
+            # Simple derivative with light filtering
+            error_derivative = (self.error_history[-1] - self.error_history[-2]) / actual_dt
+            d_term = self.kd * error_derivative
+
+            # Check for large D term
+            d_term_rpm = d_term / 109226.67
+            if abs(d_term_rpm) > 20:
+                print(f"WARNING: Large D term: {d_term_rpm:.1f} RPM from derivative {error_derivative:.0f}")
+
+        # Velocity feedforward
+        feedforward = self.kv * desired_velocity
+
+        # Very light velocity damping
+        damping = -self.velocity_damping * actual_velocity
+
+        # Calculate desired output
+        desired_output = p_term + d_term + feedforward + damping
+
+        # Integral term (only if Ki > 0)
+        if self.ki > 0:
+            # Conservative integration
+            if abs(self.last_output) < self.output_limit * 0.8:
+                self.integral += filtered_error * actual_dt
+
+            # Apply integral limits
+            if self.integral > self.integral_limit:
+                self.integral = self.integral_limit
+            elif self.integral < -self.integral_limit:
+                self.integral = -self.integral_limit
+
+            i_term = self.ki * self.integral
+            i_term_rpm = i_term / 109226.67
+            if abs(i_term_rpm) > 20:
+                print(f"WARNING: Large I term: {i_term_rpm:.1f} RPM from integral {self.integral:.0f}")
+
+            desired_output += i_term
+
+        # CRITICAL: Apply rate limiting - this prevents the velocity spikes!
+        velocity_change = desired_output - self.last_output
+
+        # DEBUG: Check if rate limiting is being triggered
+        if abs(velocity_change) > self.max_velocity_change:
+            change_rpm = velocity_change / 109226.67
+            limit_rpm = self.max_velocity_change / 109226.67
+            print(f"RATE LIMITING: Wanted change of {change_rpm:.1f} RPM, limited to {limit_rpm:.1f} RPM")
+            velocity_change = math.copysign(self.max_velocity_change, velocity_change)
+
+        # Calculate new output with rate limiting
+        velocity_command = self.last_output + velocity_change
+
+        # Light output filtering (optional)
+        self.output_history.append(velocity_command)
+        if len(self.output_history) > self.filter_length:
+            self.output_history.pop(0)
+
+        if len(self.output_history) >= self.filter_length:
+            filtered_command = sum(self.output_history) / len(self.output_history)
+            # Check if filtering makes a big difference
+            filter_diff = abs(filtered_command - velocity_command) / 109226.67
+            if filter_diff > 5:
+                print(f"OUTPUT FILTERING: Changed command by {filter_diff:.1f} RPM")
+            velocity_command = filtered_command
+
+        # Apply absolute output limits
+        if velocity_command > self.output_limit:
+            print(
+                f"OUTPUT LIMITING: Command {velocity_command / 109226.67:.1f} RPM limited to {self.output_limit / 109226.67:.1f} RPM")
+            velocity_command = self.output_limit
+        elif velocity_command < -self.output_limit:
+            print(
+                f"OUTPUT LIMITING: Command {velocity_command / 109226.67:.1f} RPM limited to {-self.output_limit / 109226.67:.1f} RPM")
+            velocity_command = -self.output_limit
+
+        # Store for next iteration
+        self.last_output = velocity_command
+        self.last_error = position_error
+
+        return velocity_command
+
+    def set_limits(self, max_velocity_rpm: float):
+        """Set velocity limits based on RPM"""
+        self.output_limit = max_velocity_rpm * 65536 * 100 / 60
+
+    def set_dead_zone(self, dead_zone: float):
+        """Set dead zone for small position errors"""
+        self.dead_zone = dead_zone
+
+    def set_rate_limit(self, max_change_rpm: float):
+        """Set maximum velocity change per control cycle (THIS IS KEY!)"""
+        self.max_velocity_change = max_change_rpm * 65536 * 100 / 60
+        print(f"Rate limit set to {max_change_rpm} RPM per cycle ({self.max_velocity_change:.0f} increments/sec/cycle)")
+
+
+@dataclass
+class TrajectoryPoint:
+    """Single point in a trajectory"""
+    position: float
+    velocity: float
+    acceleration: float
+    time: float
+
+  
+    
+    
+class TrajectoryGenerator:
+    """Generate smooth trajectories between positions"""
+
+    def __init__(self, max_velocity: float = 100000, max_acceleration: float = 50000):
+        self.max_velocity = max_velocity
+        self.max_acceleration = max_acceleration
+
+    def generate_point_to_point(self, start_pos: float, end_pos: float,
+                                current_time: float, move_time: float = 2.0) -> TrajectoryPoint:
+        """
+        Generate a smooth point-to-point trajectory using S-curve profile
+
+        Args:
+            start_pos: Starting position
+            end_pos: Target position
+            current_time: Current time in the move
+            move_time: Total time for the move
+
+        Returns:
+            TrajectoryPoint with position, velocity, acceleration
+        """
+        if current_time <= 0:
+            return TrajectoryPoint(start_pos, 0, 0, current_time)
+        elif current_time >= move_time:
+            return TrajectoryPoint(end_pos, 0, 0, current_time)
+
+        # Normalized time (0 to 1)
+        t = current_time / move_time
+        distance = end_pos - start_pos
+
+        # S-curve (quintic polynomial) for smooth motion
+        # Position profile: s(t) = 10t³ - 15t⁴ + 6t⁵
+        s = 10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5
+        s_dot = (30 * t ** 2 - 60 * t ** 3 + 30 * t ** 4) / move_time
+        s_ddot = (60 * t - 180 * t ** 2 + 120 * t ** 3) / (move_time ** 2)
+
+        position = start_pos + distance * s
+        velocity = distance * s_dot
+        acceleration = distance * s_ddot
+
+        return TrajectoryPoint(position, velocity, acceleration, current_time)

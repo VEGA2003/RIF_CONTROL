@@ -14,6 +14,7 @@ from can_bus_manager import CANBusManager
 import adi
 import os
 import csv
+from virtual_telescope import VirtualTelescope
 
 class ComponentState(Enum):
     IDLE = auto()
@@ -38,28 +39,48 @@ class Observation:
 
 
 class Telescope():
-    def __init__(self):    
+    def __init__(self, virtual=False):    
         # default observing location is the Huygens building :)
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
         self.revolutions_to_increments = 6553600
         self.earth_speed = 1000000
-        
+        self.virtual = virtual
         self.lock = threading.Lock()
-        self.can_bus_manager = CANBusManager()
+        
+        if self.virtual:
+            self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
+            self.virtual_telescope = VirtualTelescope(4)
+        else:
+            self.can_bus_manager = CANBusManager()
+            
         self.request_queue = []
         # self.drives = [self.drive_HA, self.drive_DEC]
-        self.drives = [self.drive_HA]
+        # self.drives = [self.drive_HA]
         
-        self.dish_east = Dish(0)
-        self.dish_west = Dish(1)
+        self.dish_east = Dish(0, self.can_bus_manager)
+        self.dish_west = Dish(1, self.can_bus_manager)
         
         self.dishes = [self.dish_east, self.dish_west]
         self.dishes_in_position = 0
         self.state = ComponentState.IDLE
         
-        self.receiver = Receiver()
+        # Start processing thread
+        self.running = False
+        self.process_thread = None
+        
+        try:
+            self.receiver = Receiver()
+        except Exception as e: 
+            print(e)
+            self.receiver = None
+            "no receiver connected"
         
     def start(self):
+        self.running = True
+        
+        if self.virtual:
+            self.virtual_telescope.start()
+            
         for dish in self.dishes:
             dish.start()
 
@@ -185,7 +206,7 @@ class Receiver():
 
 class Dish():
     
-    def __init__(self, dish_id):    
+    def __init__(self, dish_id, can_bus_manager = None):    
         # default observing location is the Huygens building :)
         self.dish_id = dish_id
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
@@ -197,25 +218,34 @@ class Dish():
         self.earth_speed = 1000000
         
         self.lock = threading.Lock()
-        self.can_bus_manager = CANBusManager()
+        if can_bus_manager == None :
+            self.can_bus_manager = CANBusManager()
+        else:
+            self.can_bus_manager = can_bus_manager
+            
         self.request_queue = []
         self.drive_HA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
         self.drive_DEC = ARS2108System(self.dish_id*2 + 2, self.can_bus_manager)
         # self.drives = [self.drive_HA, self.drive_DEC]
         self.drives = [self.drive_HA]
         self.state = ComponentState.IDLE
+        
+        # Start processing thread
+        self.running = False
+        self.process_thread = None
 
         
     def start(self):
         for drive in self.drives:
             drive.start()
-
+            
+        self.running = True
         self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
         self.process_thread.start()
         
     def coord_to_pos(self, ra, dec, observing_time=None):
         if observing_time == None:
-            observing_time = Time(datetime.now())
+            observing_time = Time(datetime.datetime.now())
         
         # aa = AltAz(location=self.observing_location, obstime=observing_time)
         # coordAltAz = coord.transform_to(aa)
