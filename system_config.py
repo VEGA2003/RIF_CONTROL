@@ -456,6 +456,9 @@ class ARS2108System():
         self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2, callback=self.moving)
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
         
+    def set_max_acceleration(self, max_accel):
+        self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, max_accel, 4) 
+        
     def moving(self, succes, error):
         if succes:
             self.state = DriveState.MOVING 
