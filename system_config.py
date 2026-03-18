@@ -172,6 +172,9 @@ class ARS2108System():
             InitStep("Enable RPDO2", "sdo", 0x1401, 0x01, 0x300 + self.node_id, 4),
 
             InitStep("Start Remote Node", "nmt", nmt_command=0x01),
+            
+            InitStep("Reset warnings", "sdo", 0x6040, 0x00, ControlWord.FAULT_RESET, 4),
+            
             InitStep("Final delay", "delay", delay=0.1),
         ]
         
