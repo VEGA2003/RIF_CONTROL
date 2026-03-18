@@ -27,6 +27,7 @@ class ComponentState(Enum):
 @dataclass
 class Task:
     action: Callable
+    args : tuple
     name: str
     callback: Optional[Callable[[bool, Optional[int]], None]] = None
 
@@ -39,7 +40,7 @@ class Observation:
 
 
 class Telescope():
-    def __init__(self, virtual=False):    
+    def __init__(self, virtual=False, bitrate: int = 500000):    
         # default observing location is the Huygens building :)
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
         self.revolutions_to_increments = 6553600
@@ -51,7 +52,7 @@ class Telescope():
             self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
             self.virtual_telescope = VirtualTelescope(4)
         else:
-            self.can_bus_manager = CANBusManager()
+            self.can_bus_manager = CANBusManager(bitrate = bitrate)
             
         self.request_queue = []
         # self.drives = [self.drive_HA, self.drive_DEC]
@@ -84,12 +85,12 @@ class Telescope():
         for dish in self.dishes:
             dish.start()
 
-        self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
+        self.process_thread = threading.Thread(target=self._process_loop)
         self.process_thread.start()
         
-    def add_task(self, action, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
+    def add_task(self, action, *args , callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a Telescope Task """
-        task = Task(action, callback)
+        task = Task(action, args ,callback)
 
         with self.lock:
             self.request_queue.append(task)
@@ -102,7 +103,7 @@ class Telescope():
     def move_to(self, ra: str , dec: str, pos=None):
         self.dishes_in_position = 0
         for dish in self.dishes:
-            dish.add_task(dish.move_to(ra, dec), self.move_to_followup)
+            dish.add_task(dish.move_to, ra, dec, callback=self.move_to_followup)
         
     def move_to_followup(self):
         self.dishes_in_position += 1
@@ -132,31 +133,32 @@ class Telescope():
                     # Process next request if idle
                     if self.state == ComponentState.IDLE and self.request_queue:
                         self.current_request = self.request_queue.pop(0)
-                        print(
-                            f"Processing SDO request for node {self.current_request.node_id}, index 0x{self.current_request.index:04X}:{self.current_request.subindex:02X}, value={self.current_request.value}")
+                        print(f"Processing request for telescope")
                         self._send_current_request()
 
                 time.sleep(0.01)  # Small delay to prevent busy waiting
 
             except Exception as e:
-                print(f"SDO state machine error: {e}")
-                import traceback
-                traceback.print_exc()
-                # Reset state on error
-                with self.lock:
-                    if self.current_request:
-                        self._complete_request(False, None)
-                    self.state = ComponentState.IDLE    
+                print(f"Dish error: {e}")
+                self.state = ComponentState.IDLE
+            #     import traceback
+            #     traceback.print_exc()
+            #     # Reset state on error
+            #     with self.lock:
+            #         if self.current_request:
+            #             self._complete_request(False, None)
+            #         self.state = ComponentState.IDLE    
                     
     def _send_current_request(self):
         """Send the current SDO request"""
         if not self.current_request:
             return
         self.state = ComponentState.BUSY
-        self.current_request.action()
-        self.current_request.callback()
+        self.current_request.action(*self.current_request.args)
+        if self.current_request.callback != None:
+            self.current_request.callback()
         print("request completed")
-        self.IDLE
+        self.state = ComponentState.IDLE
         return True
 
     def get_queue_length(self) -> int:
@@ -226,8 +228,8 @@ class Dish():
         self.request_queue = []
         self.drive_HA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
         self.drive_DEC = ARS2108System(self.dish_id*2 + 2, self.can_bus_manager)
-        # self.drives = [self.drive_HA, self.drive_DEC]
-        self.drives = [self.drive_HA]
+        self.drives = [self.drive_HA, self.drive_DEC]
+        # self.drives = [self.drive_HA]
         self.state = ComponentState.IDLE
         
         # Start processing thread
@@ -260,11 +262,13 @@ class Dish():
         return posDEC, posHA
         
     def move_to(self, ra: str , dec: str, pos=None):
+        print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
         posDEC, posHA = self.coord_to_pos(ra, dec)
         self.drive_DEC.set_position_sdo(posDEC)
         self.drive_HA.set_position_sdo(posHA)
         while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_HA.state !=  DriveState.TARGET_REACHED:
-            print(self.drive_DEC.state, self.drive_HA.state)
+            print(self.dish_id, self.drive_DEC.state, self.drive_HA.state)
+            # pass
         self.state = ComponentState.IDLE
         
     def set_position(self, drive, pos):
@@ -282,9 +286,10 @@ class Dish():
     def track(self):
         self.drive_HA.set_velocity(self.earth_speed)
     
-    def add_task(self, action, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
+    def add_task(self, action, *args, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a dish Task """
-        task = Task(action, callback)
+        print(f"task queued for {self.drive_DEC.node_id} and {self.drive_HA.node_id}")
+        task = Task(action, args, callback)
 
         with self.lock:
             self.request_queue.append(task)
@@ -305,29 +310,30 @@ class Dish():
                     # Process next request if idle
                     if self.state == ComponentState.IDLE and self.request_queue:
                         self.current_request = self.request_queue.pop(0)
-                        print(
-                            f"Processing SDO request for node {self.current_request.node_id}, index 0x{self.current_request.index:04X}:{self.current_request.subindex:02X}, value={self.current_request.value}")
+                        print(f"Processing SDO request for dish {self.dish_id}")
                         self._send_current_request()
 
                 time.sleep(0.01)  # Small delay to prevent busy waiting
 
             except Exception as e:
-                print(f"SDO state machine error: {e}")
-                import traceback
-                traceback.print_exc()
-                # Reset state on error
-                with self.lock:
-                    if self.current_request:
-                        self._complete_request(False, None)
-                    self.state = ComponentState.IDLE
+                print(f"Dish error: {e}")
+                self.state = ComponentState.IDLE
+            #     import traceback
+            #     traceback.print_exc()
+            #     # Reset state on error
+            #     with self.lock:
+            #         if self.current_request:
+            #             self._complete_request(False, None)
+            #         self.state = ComponentState.IDLE
 
     def _send_current_request(self):
         """Send the current SDO request"""
         if not self.current_request:
             return
         self.state = ComponentState.BUSY
-        self.current_request.action()
-        self.current_request.callback()
+        self.current_request.action(*self.current_request.args)
+        if self.current_request.callback() != None:
+            self.current_request.callback()
         print("request completed")
         self.IDLE
         return True

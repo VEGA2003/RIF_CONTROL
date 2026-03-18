@@ -4,6 +4,7 @@ import time
 from system_config import ControlMode, ControlWord, bcolors, DriveState, StatusWord
 from dataclasses import dataclass
 import math
+import threading
 
 class VirtualTelescope():
     def __init__(self, num_devices): 
@@ -17,8 +18,8 @@ class VirtualTelescope():
 
         
     def start(self):
-        # for device in self.devices:
-        #     device.start()
+        for device in self.devices:
+            device.start()
         self.can_bus_manager.start()
         print("Virtual telescope running...")
 
@@ -29,22 +30,35 @@ class ARS2108Sim:
         self.status_word = 0x0040  # Switch on disabled
         self.target_position = 0
         self.actual_position = 0
-        self.mode = 1  # Profile Position
+        self.actual_velocity = 0
+        self.control_mode = ControlMode.POSITIONING  # Profile Position
         self.node_id = node_id
         self.can_bus_manager = can_bus_manager
         self.can_bus_manager.add_handler(self)
-        
+        self.time = 0
+        self.state = DriveState.SWITCHED_ON
         # Control parameters - Keep high rate but make controller gentler
         self.control_rate = 100.0  # Keep 100 Hz for good tracking
 
         # PID controllers for each drive - VERY small gains with rate limiting
-        self.pid_controllers = {
-            1: PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0),  # Extremely small gain
-            2: PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0)  # Extremely small gain
+        self.pid_controller = PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0)
+        # # Set velocity limits and dead zones for your system
+        # self.pid_controller.set_limits(100)  # Moderate max velocity - 100 RPM
+        # self.pid_controller.set_dead_zone(200)  # 200 count dead zone
+        # self.pid_controller.set_rate_limit(5)  # Critical: Only 5 RPM change per 10ms cycle!
+
+        # Trajectory generators
+        self.trajectory_generators = {
+            1: TrajectoryGenerator(),
+            2: TrajectoryGenerator()
         }
 
-    # def start(self):
-    #     self.can_bus_manager.start()
+    def start(self):
+        # Start control loop
+        print(bcolors.OKGREEN,f"drive {self.node_id} has started", bcolors.ENDC)
+        self.running = True
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self.control_thread.start()
         
     def write_object(self, index, subindex, value):
         if index == 0x6040:
@@ -53,9 +67,11 @@ class ARS2108Sim:
 
         elif index == 0x607A:
             self.target_position = value
-
+            self.state = DriveState.MOVING
+            self.status_word = 0x0027
+            print(f"{self.node_id} has been moved!")
         elif index == 0x6060:
-            self.mode = value
+            self.control_mode = ControlMode[value]
 
     def read_object(self, index, subindex):
         if index == 0x6041:
@@ -65,7 +81,7 @@ class ARS2108Sim:
             return self.actual_position
 
         elif index == 0x6061:
-            return self.mode
+            return self.control_mode
 
         return 0
 
@@ -80,7 +96,7 @@ class ARS2108Sim:
             self.status_word = 0x0027  # Operation enabled
 
             # simulate motion
-            self.actual_position = self.target_position
+            # self.actual_position = self.target_position
     
         
     def can_handle_message(self, message: can.Message) -> bool:
@@ -126,24 +142,53 @@ class ARS2108Sim:
             response = can.Message(arbitration_id=0x580 + self.node_id, data=response_data, is_extended_id=False)
             self.can_bus_manager.send_message(response)
             
+        
+    
+    def _control_loop(self):
+        """Main control loop with multiple control modes"""
+        dt = 1.0 / self.control_rate
+        next_time = time.time()
+        cycle_count = 0 
+        
+
+        print(bcolors.OKGREEN,f"Control loop started in {self.control_mode.value} mode", bcolors.ENDC)
+
+        while self.running:
+            cycle_count += 1
+            # Execute control based on current mode
+            if self.control_mode == ControlMode.DISABLED:
+                # Send zero velocity to all drives
+                for drive in self.drives.values():
+                    drive.set_velocity(0)
+
+            elif self.control_mode == ControlMode.POSITIONING:
+                self._update_positioning_mode(dt)
             
+            # elif self.control_mode == ControlMode.TRACKING:
+            #     self._update_tracking_mode(dt)
+            self.actual_position += self.actual_velocity * dt
+            self.time += dt
+            error = abs(self.actual_position - self.target_position) 
+            if error <= 300 and self.state == DriveState.MOVING:
+                print("statuso",self.status_word & 0x0400)
+                self.status_word = self.status_word | 0x0400
+                print("statuss",self.status_word & 0x0400)
+                print("error: ", error)
+
+    def _update_positioning_mode(self, dt: float):
+        """Update positioning mode - move to static targets"""
+        # PID control
+        velocity = self.pid_controller.update(
+            desired_position=self.target_position,
+            actual_position=self.actual_position,
+            actual_velocity=self.actual_velocity,
+            desired_velocity=0.0,
+            dt=dt
+        )
+        # Send velocity command
+        self.actual_velocity = velocity
             
-    def set_position_sdo(self, position, now = False, wait=None):
-        if self.control_mode != ControlMode.POSITIONING: 
-            self.set_control_mode(ControlMode.POSITIONING)
-        
-        if now:
-            controlword = ControlWord.CHANGE_SET_IMMEDIATELY | ControlWord.NEW_SET_POINT
-        else:
-            controlword = ControlWord.NEW_SET_POINT
-        
-        self.sdo_manager.write_sdo(self.node_id, 0x607A, 0x00, position, 4) 
-        # Trigger with controlword via SDO
-        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F | controlword, 2)
-        time.sleep(0.05)
-        self.sdo_manager.write_sdo(self.node_id, 0x6040, 0x00, 0x0F, 2, callback=self.moving)
-        print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
-        
+
 
 
 @dataclass
@@ -203,21 +248,10 @@ class PIDController:
         """
         Update PID with debugging for 10-cycle bug detection
         """
-        current_time = time.time()
-        if self.last_time == 0.0:
-            self.last_time = current_time
-            actual_dt = 0.01  # 100 Hz default
-        else:
-            actual_dt = current_time - self.last_time
-            self.last_time = current_time
-
-        # Check for timing anomalies that could cause spikes
-        if actual_dt > 0.02:  # More than 20ms between updates
-            print(f"WARNING: Large dt detected: {actual_dt * 1000:.1f}ms - could cause velocity spike")
 
         # Position error
         position_error = desired_position - actual_position
-
+        # print(bcolors.OKGREEN, f"error: {position_error}", bcolors.ENDC)
         # Check for sudden large position error changes
         if hasattr(self, 'last_position_error'):
             error_change = abs(position_error - self.last_position_error)
@@ -262,9 +296,9 @@ class PIDController:
 
         # Derivative term (only if Kd > 0 and we have history)
         d_term = 0.0
-        if self.kd > 0 and len(self.error_history) >= 2 and actual_dt > 0:
+        if self.kd > 0 and len(self.error_history) >= 2 and dt > 0:
             # Simple derivative with light filtering
-            error_derivative = (self.error_history[-1] - self.error_history[-2]) / actual_dt
+            error_derivative = (self.error_history[-1] - self.error_history[-2]) / dt
             d_term = self.kd * error_derivative
 
             # Check for large D term
@@ -285,7 +319,7 @@ class PIDController:
         if self.ki > 0:
             # Conservative integration
             if abs(self.last_output) < self.output_limit * 0.8:
-                self.integral += filtered_error * actual_dt
+                self.integral += filtered_error * dt
 
             # Apply integral limits
             if self.integral > self.integral_limit:

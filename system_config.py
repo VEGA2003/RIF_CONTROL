@@ -414,7 +414,7 @@ class ARS2108System():
             self.set_control_mode(ControlMode.VELOCITY)
         control_word = (ControlWord.ENABLE_VOLTAGE | ControlWord.QUICK_STOP |
                 ControlWord.SWITCH_ON | ControlWord.ENABLE_OPERATION)
-        data = struct.pack('<Hl', control_word, self.velocity)
+        data = struct.pack('<Hi', control_word, self.velocity)
         message = can.Message(arbitration_id=0x200 + 1, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
         print(bcolors.OKBLUE + f"velocity set to {self.velocity}" + bcolors.ENDC)
