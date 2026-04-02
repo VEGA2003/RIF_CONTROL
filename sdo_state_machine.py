@@ -168,25 +168,45 @@ class SDOStateMachine:
             return
 
         req = self.current_request
-
         # Build SDO write command
-        if req.size == 1:
-            cmd = 0x2F  # Expedited transfer, 1 byte
-            data = struct.pack('<BBBBB', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value & 0xFF)
-            data += b'\x00\x00\x00'  # Pad to 8 bytes
-        elif req.size == 2:
-            cmd = 0x2B  # Expedited transfer, 2 bytes
-            data = struct.pack('<BBBBH', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex,
-                               req.value & 0xFFFF)
-            data += b'\x00\x00'  # Pad to 8 bytes
-        elif req.size == 4:
-            cmd = 0x23  # Expedited transfer, 4 bytes
-            data = struct.pack('<BBBBL', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value)
-        else:
-            print(f"Unsupported SDO data size: {req.size}")
-            self._complete_request(False, None)
-            return
-
+            
+        if req.value >= 0:   
+            if req.size == 1:
+                cmd = 0x2F  # Expedited transfer, 1 byte
+                data = struct.pack('<BBBBB', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value & 0xFF)
+                data += b'\x00\x00\x00'  # Pad to 8 bytes
+            elif req.size == 2:
+                cmd = 0x2B  # Expedited transfer, 2 bytes
+                data = struct.pack('<BBBBH', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex,
+                                req.value & 0xFFFF)
+                data += b'\x00\x00'  # Pad to 8 bytes
+            elif req.size == 4:
+                cmd = 0x23  # Expedited transfer, 4 bytes
+                data = struct.pack('<BBBBL', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value)
+            else:
+                print(f"Unsupported SDO data size: {req.size}")
+                self._complete_request(False, None)
+                return
+            
+        else:   
+            if req.size == 1:
+                cmd = 0x2F  # Expedited transfer, 1 byte
+                data = struct.pack('<BBBBb', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value & 0xFF)
+                data += b'\x00\x00\x00'  # Pad to 8 bytes
+            elif req.size == 2:
+                cmd = 0x2B  # Expedited transfer, 2 bytes
+                data = struct.pack('<BBBBh', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex,
+                                req.value & 0xFFFF)
+                data += b'\x00\x00'  # Pad to 8 bytes
+            elif req.size == 4:
+                cmd = 0x23  # Expedited transfer, 4 bytes
+                data = struct.pack('<BBBBl', cmd, req.index & 0xFF, (req.index >> 8) & 0xFF, req.subindex, req.value)
+            else:
+                print(f"Unsupported SDO data size: {req.size}")
+                self._complete_request(False, None)
+                return
+        
+        
         message = can.Message(arbitration_id=0x600 + req.node_id, data=data, is_extended_id=False)
 
         print(f"SDO sending: ID=0x{message.arbitration_id:03X}, data={message.data.hex()}")
