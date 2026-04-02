@@ -65,6 +65,7 @@ class DriveState(Enum):
     FAULT = 7
     TARGET_REACHED = 8
     MOVING = 9
+    WAITING_RESPONSE = 10
 
 class StatusWord:
     """DS402 Status Word bit definitions"""
@@ -159,12 +160,15 @@ class ARS2108System():
             InitStep("Enable TPDO1 mapping", "sdo", 0x1A00, 0x00, 2, 1),
 
             InitStep("Clear TPDO2 mapping", "sdo", 0x1A01, 0x00, 0, 1),
-            InitStep("Map TPDO2 Velocity Actual", "sdo", 0x1A01, 0x01, 0x606C0020, 4),
+            # InitStep("Map TPDO2 Velocity Actual", "sdo", 0x1A01, 0x01, 0x606C0020, 4),
+            InitStep("Map TPDO1 Status Word", "sdo", 0x1A01, 0x01, 0x60410010, 4),
             InitStep("Map TPDO2 Torque Actual", "sdo", 0x1A01, 0x02, 0x60770010, 4),
             InitStep("Enable TPDO2 mapping", "sdo", 0x1A01, 0x00, 2, 1),
 
-            InitStep("Set TPDO1 transmission type", "sdo", 0x1800, 0x02, 1, 1),
-            InitStep("Set TPDO2 transmission type", "sdo", 0x1801, 0x02, 1, 1),
+            # InitStep("Set TPDO1 transmission type", "sdo", 0x1800, 0x02, 1, 1),
+            # InitStep("Set TPDO2 transmission type", "sdo", 0x1801, 0x02, 1, 1),
+            InitStep("Set TPDO1 transmission type", "sdo", 0x1800, 0x02, 0xFE, 1),
+            InitStep("Set TPDO2 transmission type", "sdo", 0x1801, 0x02, 0xFE, 1),
 
             InitStep("Enable TPDO1", "sdo", 0x1800, 0x01, 0x180 + self.node_id, 4),
             InitStep("Enable TPDO2", "sdo", 0x1801, 0x01, 0x280 + self.node_id, 4),
@@ -173,7 +177,7 @@ class ARS2108System():
 
             InitStep("Start Remote Node", "nmt", nmt_command=0x01),
             
-            InitStep("Reset warnings", "sdo", 0x6040, 0x00, ControlWord.FAULT_RESET, 4),
+            InitStep("Reset warnings", "sdo", 0x6040, 0x00, ControlWord.FAULT_RESET, 2),
             
             InitStep("Final delay", "delay", delay=0.1),
         ]
@@ -210,8 +214,8 @@ class ARS2108System():
                     self.initialization_step += 1
                     self._execute_next_init_step()
                 else:
-                    print(
-                        f"Drive {self.node_id} initialization failed at step {self.initialization_step}: {step.description}")
+                    print(bcolors.FAIL,
+                        f"Drive {self.node_id} initialization failed at step {self.initialization_step}: {step.description}", bcolors.ENDC)
                     if error_code:
                         print(f"  Error code: 0x{error_code:08X}")
                     if self.init_callback:
@@ -317,9 +321,10 @@ class ARS2108System():
             with self.lock:
                 self.velocity = velocity
                 self.torque = torque
+                print(f"torque {torque}")
         
     def _process_tpdo3(self, data: bytes):
-        """Process TPDO2 data (Velocity + Torque)"""
+        """Process TPDO3 data (position + status)"""
         if len(data) >= 6:
             status_word, position = struct.unpack('<Hl', data[:6])
             with self.lock:
@@ -331,6 +336,7 @@ class ARS2108System():
         if self.control_mode == ControlMode.POSITIONING:
             if self.status_word & 0x1000 :
                 print(bcolors.OKGREEN, "setpoint acknowledged", bcolors.ENDC)
+        if self.control_mode == ControlMode.POSITIONING or self.control_mode == ControlMode.VELOCITY:
             if self.status_word & 0x0400 :
                 if self.state == DriveState.MOVING:
                     print(bcolors.OKGREEN, "target reached", bcolors.ENDC)
@@ -420,6 +426,18 @@ class ARS2108System():
         data = struct.pack('<Hi', control_word, self.velocity)
         message = can.Message(arbitration_id=0x200 + 1, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
+        while self.status_word & 0x0400:
+            print("waiting for acceleration")
+            pass
+        self.state = DriveState.MOVING
+        print(bcolors.OKBLUE + f"velocity set to {self.velocity}" + bcolors.ENDC)
+        
+    def set_velocity_sdo(self, velocity):
+        self.velocity = velocity
+        if self.control_mode != ControlMode.VELOCITY: 
+            self.set_control_mode(ControlMode.VELOCITY)
+        self.sdo_manager.write_sdo(self.node_id, 0x60FF, 0x00, velocity, 4, callback=self.moving)  
+        self.state = DriveState.WAITING_RESPONSE 
         print(bcolors.OKBLUE + f"velocity set to {self.velocity}" + bcolors.ENDC)
         
     def set_position(self, position):

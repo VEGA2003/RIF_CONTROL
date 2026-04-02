@@ -261,7 +261,7 @@ class Dish():
         
         return posDEC, posHA
         
-    def move_to(self, ra: str , dec: str, pos=None):
+    def move_to(self, ra: str , dec: str):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
         posDEC, posHA = self.coord_to_pos(ra, dec)
         self.drive_DEC.set_position_sdo(posDEC)
@@ -277,14 +277,22 @@ class Dish():
             pass
         self.state = ComponentState.IDLE
         
+    def set_velocity(self, drive, vel):
+        drive.set_velocity_sdo(vel)
+        while drive.state != DriveState.TARGET_REACHED:
+            pass
+        self.state = ComponentState.IDLE
+        
         
     def wait(self,wait_time):
         print(bcolors.OKBLUE, f"waiting for {wait_time} seconds", bcolors.ENDC)
         time.sleep(wait_time)
         pass
     
-    def track(self):
+    def track(self, ra: str , dec: str, tracking_time: int):
+        self.move_to(ra , dec)
         self.drive_HA.set_velocity(self.earth_speed)
+        self.wait(tracking_time)
     
     def add_task(self, action, *args, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a dish Task """
