@@ -30,6 +30,7 @@ class CANBusManager:
     """Top-level CAN bus manager that distributes messages to handlers"""
     
     def __init__(self, interface: str = 'pcan', channel: str = "PCAN_USBBUS1", bitrate: int = 500000):
+    # def __init__(self, interface: str = 'kvaser', channel: int = 0, bitrate: int = 500000):
         self.bus = can.interface.Bus(interface=interface, channel=channel, bitrate=bitrate)
         self.handlers: List[CANMessageHandler] = []
         self.running = False
