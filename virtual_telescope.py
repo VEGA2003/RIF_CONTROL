@@ -5,6 +5,7 @@ from system_config import ControlMode, ControlWord, bcolors, DriveState, StatusW
 from dataclasses import dataclass
 import math
 import threading
+import numpy as np
 
 class VirtualTelescope():
     def __init__(self, num_devices): 
@@ -442,3 +443,29 @@ class TrajectoryGenerator:
         acceleration = distance * s_ddot
 
         return TrajectoryPoint(position, velocity, acceleration, current_time)
+    
+
+class VirtualSDR():
+    def __init__(self):
+        self.rx_hardwaregain_chan0 = 70.0 # dB
+        self.rx_hardwaregain_chan1 = 70.0 # dB
+        self.rx_lo = int(80e6) # Hz
+        self.sample_rate = int(1e6) # Hz
+        self.rx_rf_bandwidth = int(1e6) # filter width
+        self.rx_buffer_size = 10000
+        self.rx_enabled_channels = [0, 1]
+        self.gain_control_mode_chan0 = 'manual'
+        self.rx_rf_bandwidth = int(self.sample_rate*0.8)
+
+    def rx(self):
+        samples = []
+        phi = 20
+        for i in self.rx_enabled_channels:
+            tone = np.exp(i*phi)*np.exp(2j*np.pi*self.sample_rate*0.1*np.arange(self.rx_buffer_size)/self.sample_rate)
+            noise = np.random.randn(self.rx_buffer_size) + 1j*np.random.randn(self.rx_buffer_size)
+            sample = self.rx_hardwaregain_chan0*tone*0.02 + 0.1*noise
+            # Truncate to -1 to +1 to simulate ADC bit limits
+            np.clip(sample.real, -1, 1, out=sample.real)
+            np.clip(sample.imag, -1, 1, out=sample.imag)
+            samples.append(sample)
+        return np.squeeze(samples)

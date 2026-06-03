@@ -14,7 +14,7 @@ from can_bus_manager import CANBusManager
 import adi
 import os
 import csv
-from virtual_telescope import VirtualTelescope
+from virtual_telescope import VirtualTelescope, VirtualSDR
 
 class ComponentState(Enum):
     IDLE = auto()
@@ -173,11 +173,16 @@ class Telescope():
             
 
 class Receiver():
-    def __init__(self):   
-        self.sdr = adi.ad9361('ip:192.168.2.1')
-        self.sdr.rx_enabled_channels = [0, 1]
-        self.sdr.gain_control_mode_chan0 = 'manual'
-        self.sdr.gain_control_mode_chan1 = 'manual'
+    def __init__(self, virtual=False): 
+        self.virtual = virtual  
+        if virtual:
+            self.sdr = VirtualSDR()
+        else:
+            self.sdr = adi.ad9361('ip:192.168.2.1')
+            self.sdr.rx_enabled_channels = [0, 1]
+            self.sdr.gain_control_mode_chan0 = 'manual'
+            self.sdr.gain_control_mode_chan1 = 'manual'
+            
         self.sdr.rx_hardwaregain_chan0 = 70.0 # dB
         self.sdr.rx_hardwaregain_chan1 = 70.0 # dB
         self.sdr.rx_lo = int(80e6) # Hz
@@ -214,10 +219,10 @@ class Dish():
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
         self.dec_offset = 0
         self.ha_offset = 0
-        self.conversion_factor_HA = 0.001
-        self.conversion_factor_DEC = 0.001
+        self.conversion_factor_HA = 2430/24
+        self.conversion_factor_DEC = 870/360
         self.revolutions_to_increments = 6553600
-        self.earth_speed = 1000000
+        self.earth_speed = (((15/360)*2430)/3600)  #increments a second
         
         self.lock = threading.Lock()
         if can_bus_manager == None :
@@ -289,10 +294,24 @@ class Dish():
         time.sleep(wait_time)
         pass
     
+    # def track(self, ra: str , dec: str, tracking_time: int):
+    #     self.move_to(ra , dec)
+    #     self.drive_HA.set_velocity(self.earth_speed)
+    #     self.wait(tracking_time)
+
     def track(self, ra: str , dec: str, tracking_time: int):
-        self.move_to(ra , dec)
-        self.drive_HA.set_velocity(self.earth_speed)
-        self.wait(tracking_time)
+        elapsed_time = 0
+        if tracking_time >= 5:
+            dt = 5
+        else:
+            dt = 1
+        while elapsed_time < tracking_time:
+            start_time = time.time()
+            self.move_to(ra , dec)
+            self.drive_HA.set_velocity(self.earth_speed)
+            self.wait(dt)
+            end_time = time.time()
+            elapsed_time += end_time - start_time
     
     def add_task(self, action, *args, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a dish Task """
