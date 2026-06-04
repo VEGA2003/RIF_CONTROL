@@ -4,6 +4,7 @@ from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QTabWidget, QWidget, QLabel
 from TempWindow import tempGUI
 from SignalWindow import signalGUI
+from PositionWindow import positionGUI
 import threading
 from can.interface import Bus
 
@@ -39,19 +40,19 @@ class MainWindow(QMainWindow):
         self.layout = QVBoxLayout(self.central_widget)
 
         self.tab_widget = QTabWidget()
-        self.tab1 = QWidget()
+        self.tab1 = positionGUI(self)
         self.tab2 = tempGUI(self)
         self.tab3 = signalGUI(self,sdr_type=sdr_type)
 
-        self.tab_widget.addTab(self.tab1, "Viewer")
+        self.tab_widget.addTab(self.tab1, "Position")
         self.tab_widget.addTab(self.tab2, "Temperature")
         self.tab_widget.addTab(self.tab3, "Signal")
 
         self.layout.addWidget(self.tab_widget)
 
-        self.initTab1()
+        # self.initTab1()
         # self.initTab2()
-        self.initTab3()
+        # self.initTab3()
         try:
             self.bus = Bus(interface="pcan",channel = "PCAN_USBBUS1",bitrate = 500000)
         except:
