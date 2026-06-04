@@ -43,8 +43,7 @@ class Telescope():
     def __init__(self, virtual=False, bitrate: int = 500000):    
         # default observing location is the Huygens building :)
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
-        self.revolutions_to_increments = 6553600
-        self.earth_speed = 1000000
+        self.revolutions_to_increments = 65536
         self.virtual = virtual
         self.lock = threading.Lock()
         
@@ -52,7 +51,7 @@ class Telescope():
             self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
             self.virtual_telescope = VirtualTelescope(4)
         else:
-            self.can_bus_manager = CANBusManager(bitrate = bitrate)
+            self.can_bus_manager = CANBusManager(bitrate = bitrate, channel= "PCAN_USBBUS1")
             
         self.request_queue = []
         # self.drives = [self.drive_HA, self.drive_DEC]
@@ -100,10 +99,10 @@ class Telescope():
             f"dish task queued for the Telescope, (queue length: {queue_length})")
         return True
     
-    def move_to(self, ra: str , dec: str, pos=None):
+    def move_to(self, coord:SkyCoord, pos=None):
         self.dishes_in_position = 0
         for dish in self.dishes:
-            dish.add_task(dish.move_to, ra, dec, callback=self.move_to_followup)
+            dish.add_task(dish.move_to, coord, callback=self.move_to_followup)
         
     def move_to_followup(self):
         self.dishes_in_position += 1
@@ -221,8 +220,8 @@ class Dish():
         self.ha_offset = 0
         self.conversion_factor_HA = 2430/24
         self.conversion_factor_DEC = 870/360
-        self.revolutions_to_increments = 6553600
-        self.earth_speed = (((15/360)*2430)/3600)  #increments a second
+        self.revolutions_to_increments = 65536
+        self.earth_speed = (2430/(3600*24))  #increments a second
         
         self.lock = threading.Lock()
         if can_bus_manager == None :
@@ -250,13 +249,13 @@ class Dish():
         self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
         self.process_thread.start()
         
-    def coord_to_pos(self, ra, dec, observing_time=None):
+    def coord_to_pos(self, coord, observing_time=None):
         if observing_time == None:
             observing_time = Time(datetime.datetime.now())
         
         # aa = AltAz(location=self.observing_location, obstime=observing_time)
         # coordAltAz = coord.transform_to(aa)
-        coord = SkyCoord(ra, dec)
+        # coord = SkyCoord(ra, dec)
 
         lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
         ha = (lst - coord.ra).wrap_at(12*u.hourangle)
@@ -266,14 +265,14 @@ class Dish():
         
         return posDEC, posHA
         
-    def move_to(self, ra: str , dec: str):
+    def move_to(self, coord: SkyCoord):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
-        posDEC, posHA = self.coord_to_pos(ra, dec)
+        posDEC, posHA = self.coord_to_pos(coord)
         self.drive_DEC.set_position_sdo(posDEC)
         self.drive_HA.set_position_sdo(posHA)
         while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_HA.state !=  DriveState.TARGET_REACHED:
-            print(self.dish_id, self.drive_DEC.state, self.drive_HA.state)
-            # pass
+            # print(self.dish_id, self.drive_DEC.state, self.drive_HA.state)
+            pass
         self.state = ComponentState.IDLE
         
     def set_position(self, drive, pos):
@@ -299,15 +298,20 @@ class Dish():
     #     self.drive_HA.set_velocity(self.earth_speed)
     #     self.wait(tracking_time)
 
-    def track(self, ra: str , dec: str, tracking_time: int):
+    def track(self, coord: SkyCoord, tracking_time: int, tracking_func= None):
         elapsed_time = 0
-        if tracking_time >= 5:
-            dt = 5
+        if tracking_time >= 30:
+            dt = 30
         else:
-            dt = 1
+            dt = 10
         while elapsed_time < tracking_time:
             start_time = time.time()
-            self.move_to(ra , dec)
+            if tracking_func == None:
+                self.move_to(coord)
+            else:
+                observing_time = Time(datetime.datetime.now())
+                new_coord = tracking_func(observing_time)
+                self.move_to(new_coord)
             self.drive_HA.set_velocity(self.earth_speed)
             self.wait(dt)
             end_time = time.time()

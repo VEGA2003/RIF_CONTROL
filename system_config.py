@@ -84,7 +84,7 @@ class ARS2108System():
 
     def __init__(self, node_id, can_bus_manager=None ,position_calc_func: Optional[Callable] = None):
         self.velocity = 0
-
+        self.position = 0
         self.node_id = node_id
         self.init_steps = self.set_init_steps()
         # Initialize CAN bus and managers
@@ -426,9 +426,9 @@ class ARS2108System():
         data = struct.pack('<Hi', control_word, self.velocity)
         message = can.Message(arbitration_id=0x200 + 1, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
-        while self.status_word & 0x0400:
-            print("waiting for acceleration")
-            pass
+        # while self.status_word & 0x0400:
+        #     print("waiting for acceleration")
+        #     pass
         self.state = DriveState.MOVING
         print(bcolors.OKBLUE + f"velocity set to {self.velocity}" + bcolors.ENDC)
         
