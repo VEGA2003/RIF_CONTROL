@@ -10,7 +10,7 @@ from telescope_control import Telescope
 from sun_calibration import observing_program
 
 class positionGUI(QWidget):
-    def __init__(self, mainwindow = None):
+    def __init__(self, mainwindow = None, telescope_type="real", can_bus_manager=None):
         super().__init__()
         self.window = mainwindow
         # self.plot_graph = pg.PlotWidget()
@@ -58,26 +58,31 @@ class positionGUI(QWidget):
             # print((data/plotter.increments) % 1)
             #  self.polar_series.append(np.random.randint(0,360), 180)
             self.polar_series.remove(0)
-            self.polar_series.append(((data/plotter.increments) % 1)*180 , 180)
+            self.polar_series.append(((data/self.plotter.increments) % 1)*180 , 180)
 
 
         def end_of_run_callback():
-            QTimer.singleShot(0, plotter.run) # Run worker again immediately
+            QTimer.singleShot(0, self.plotter.run) # Run worker again immediately
 
 
-        plotter = TelescopePlotter()
-        plotter.update_plot.connect(update_position_callback)
-        plotter.end_of_run.connect(end_of_run_callback)
-        plotter.run()
-        plotter.worker.run()
+        self.plotter = TelescopePlotter(telescope_type, can_bus_manager)
+        self.plotter.update_plot.connect(update_position_callback)
+        self.plotter.end_of_run.connect(end_of_run_callback)
+
+
+        self.plotter.run()
+        
+
+    def start(self):
+        self.plotter.worker.run()
 
 class TelescopePlotter(QObject):
-        def __init__(self):
+        def __init__(self, telescope_type, can_bus_manager=None):
             super().__init__()
 
             # Initialize worker and thread
             self.thread = QThread()
-            self.worker = TelescopeWorker()
+            self.worker = TelescopeWorker(telescope_type, can_bus_manager)
             self.worker.moveToThread(self.thread)
             self.increments = self.worker.telescope.revolutions_to_increments
         
@@ -89,9 +94,9 @@ class TelescopePlotter(QObject):
             self.end_of_run.emit() # emit the signal to keep the loop going
 
 class TelescopeWorker(QObject):
-        def __init__(self):
+        def __init__(self, telescope_type, can_bus_manager):
             super().__init__()
-            self.telescope = Telescope()
+            self.telescope = Telescope(telescope_type, can_bus_manager=can_bus_manager)
             self.drive = self.telescope.dish_east.drive_HA
 
         def run(self):
@@ -101,7 +106,8 @@ class TelescopeWorker(QObject):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    window = positionGUI()
+    window = positionGUI(telescope_type="real")
     window.show()
+    window.start()
     signal.signal(signal.SIGINT, signal.SIG_DFL) # this lets control-C actually close the app
     sys.exit(app.exec())
