@@ -40,18 +40,26 @@ class Observation:
 
 
 class Telescope():
-    def __init__(self, virtual=False, bitrate: int = 500000):    
+    def __init__(self,telescope_type="real", bitrate: int = 500000, can_bus_manager= None):    
         # default observing location is the Huygens building :)
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
         self.revolutions_to_increments = 65536
-        self.virtual = virtual
+        if telescope_type == "virtual":
+            self.virtual = True
+        else:
+            self.virtual = False
         self.lock = threading.Lock()
         
-        if self.virtual:
-            self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
-            self.virtual_telescope = VirtualTelescope(4)
+        if can_bus_manager == None:
+            if self.virtual:
+                self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
+            else:
+                self.can_bus_manager = CANBusManager(bitrate = bitrate, channel= "PCAN_USBBUS1")
         else:
-            self.can_bus_manager = CANBusManager(bitrate = bitrate, channel= "PCAN_USBBUS1")
+            self.can_bus_manager = can_bus_manager
+        
+        if self.virtual:
+            self.virtual_telescope = VirtualTelescope(4)
             
         self.request_queue = []
         # self.drives = [self.drive_HA, self.drive_DEC]
@@ -264,6 +272,12 @@ class Dish():
         posHA = int(((ha.value - self.ha_offset)*self.conversion_factor_HA)*self.revolutions_to_increments)
         
         return posDEC, posHA
+    
+    def pos_to_coord(self, posDEC,posHA, observing_time=None):
+        coordDEC = (posDEC/(self.revolutions_to_increments*self.self.conversion_factor_DEC)) + self.dec_offset
+        coordHA = (posHA/(self.revolutions_to_increments*self.self.conversion_factor_HA)) + self.ha_offset
+
+        return coordDEC, coordHA
         
     def move_to(self, coord: SkyCoord):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
