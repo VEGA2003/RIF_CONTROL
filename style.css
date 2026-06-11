@@ -1,0 +1,5 @@
+QWidget { background-color: pink;}
+
+QPushButton::hover{background-color:palevioletred;}
+
+QTabBar::tab::selected{background-color:palevioletred;}
