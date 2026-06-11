@@ -87,6 +87,7 @@ class ARS2108System():
         self.position = 0
         self.node_id = node_id
         self.init_steps = self.set_init_steps()
+        self.r = 65536
         # Initialize CAN bus and managers
         # self.state
         self.lock = threading.Lock()
@@ -105,10 +106,11 @@ class ARS2108System():
         
         self.state = DriveState.SWITCHED_ON
     
-    def start(self):
+    def start(self, skip_init=False):
         self.can_bus_manager.start()
         self.sdo_manager.start()
-        self.initialize()
+        if not skip_init:
+            self.initialize()
         
     def stop(self):
         """Stop the complete system"""
@@ -410,8 +412,10 @@ class ARS2108System():
         
         if mode == ControlMode.POSITIONING:
             self.sdo_manager.write_sdo(self.node_id, 0x6060, 0x00, 1, 1)  # Positioning mode
-            self.sdo_manager.write_sdo(self.node_id,0x6081, 0x00, 10000000, 4)
-            # self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, 120000, 1)
+            self.sdo_manager.write_sdo(self.node_id,0x6081, 0x00, 2*self.r, 4)
+            # self.sdo_manager.write_sdo(self.node_id,0x6082, 0x00, 0, 4)
+            # self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, int(0.01*self.r), 1)
+            # self.sdo_manager.write_sdo(self.node_id, 0x6084, 0x00, int(0.01*self.r), 1)
             # self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, 120000, 1)
 
         
@@ -478,7 +482,10 @@ class ARS2108System():
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
         
     def set_max_acceleration(self, max_accel):
-        self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, max_accel, 4) 
+        self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, max_accel, 4)
+
+    def set_max_velocity_positioning(self, max_vel):
+        self.sdo_manager.write_sdo(self.node_id, 0x6081, 0x00, max_vel, 4)  
         
     def moving(self, succes, error):
         if succes:
