@@ -1,7 +1,7 @@
 from astropy.coordinates import EarthLocation,SkyCoord
 from astropy.time import Time
 from astropy import units as u
-from astropy.coordinates import AltAz
+from astropy.coordinates import AltAz, HADec, Angle
 from datetime import datetime
 from system_config import ARS2108System, DriveState, bcolors
 from enum import Enum, auto
@@ -76,21 +76,21 @@ class Telescope():
         self.running = False
         self.process_thread = None
         
-        try:
-            self.receiver = Receiver()
-        except Exception as e: 
-            print(e)
-            self.receiver = None
-            "no receiver connected"
+        # try:
+        #     self.receiver = Receiver()
+        # except Exception as e: 
+        #     print(e)
+        #     self.receiver = None
+        #     "no receiver connected"
         
-    def start(self):
+    def start(self, skip_init=False):
         self.running = True
         
         if self.virtual:
             self.virtual_telescope.start()
             
         for dish in self.dishes:
-            dish.start()
+            dish.start(skip_init)
 
         self.process_thread = threading.Thread(target=self._process_loop)
         self.process_thread.start()
@@ -223,13 +223,15 @@ class Dish():
     def __init__(self, dish_id, can_bus_manager = None):    
         # default observing location is the Huygens building :)
         self.dish_id = dish_id
-        self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)  
-        self.dec_offset = 0
-        self.ha_offset = 0
-        self.conversion_factor_HA = 2430/24
-        self.conversion_factor_DEC = 870/360
+        # self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m) 
+        # self.observing_location = EarthLocation(lat='51.82465', lon='5.86923333', height=20*u.m) #east  
+        self.observing_location = EarthLocation(lat='51.82466667', lon='5.86875', height=27*u.m) #west
         self.revolutions_to_increments = 65536
-        self.earth_speed = (2430/(3600*24))  #increments a second
+        self.dec_offset = 76.56
+        self.ha_offset = -827
+        self.conversion_factor_HA = -2430/24
+        self.conversion_factor_DEC = -870/360
+        self.earth_speed = int(self.conversion_factor_HA/3600 * self.revolutions_to_increments)  #increments a second
         
         self.lock = threading.Lock()
         if can_bus_manager == None :
@@ -249,39 +251,43 @@ class Dish():
         self.process_thread = None
 
         
-    def start(self):
+    def start(self, skip_init=False):
         for drive in self.drives:
-            drive.start()
+            drive.start(skip_init)
             
         self.running = True
         self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
         self.process_thread.start()
         
-    def coord_to_pos(self, coord, observing_time=None):
+    def coord_to_pos(self, coord,observing_time=None, transform=True):
         if observing_time == None:
             observing_time = Time(datetime.datetime.now())
         
-        # aa = AltAz(location=self.observing_location, obstime=observing_time)
-        # coordAltAz = coord.transform_to(aa)
+        if transform:
+            hadec = HADec(location=self.observing_location, obstime=observing_time)
+            coordHADec = coord.transform_to(hadec)
+        else:
+            coordHADec = coord
         # coord = SkyCoord(ra, dec)
 
-        lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
-        ha = (lst - coord.ra).wrap_at(12*u.hourangle)
+        # lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
+        # ha = (lst - coord.ra).wrap_at(12*u.hourangle)
         
-        posDEC = int(((coord.dec.value - self.dec_offset)*self.conversion_factor_DEC)*self.revolutions_to_increments)
-        posHA = int(((ha.value - self.ha_offset)*self.conversion_factor_HA)*self.revolutions_to_increments)
+        posDEC = int((coordHADec.dec.value*self.conversion_factor_DEC - self.dec_offset)*self.revolutions_to_increments)
+        posHA = int((coordHADec.ha.value*self.conversion_factor_HA - self.ha_offset)*self.revolutions_to_increments)
         
         return posDEC, posHA
     
     def pos_to_coord(self, posDEC,posHA, observing_time=None):
-        coordDEC = (posDEC/(self.revolutions_to_increments*self.self.conversion_factor_DEC)) + self.dec_offset
-        coordHA = (posHA/(self.revolutions_to_increments*self.self.conversion_factor_HA)) + self.ha_offset
+        coordDEC = ((posDEC/self.revolutions_to_increments) + self.dec_offset)/self.conversion_factor_DEC
+        coordHA = ((posHA/self.revolutions_to_increments) + self.ha_offset)/self.conversion_factor_HA
 
-        return coordDEC, coordHA
+        hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
+        return hadec
         
-    def move_to(self, coord: SkyCoord):
+    def move_to(self, coord: SkyCoord, observing_time=None):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
-        posDEC, posHA = self.coord_to_pos(coord)
+        posDEC, posHA = self.coord_to_pos(coord, observing_time, transform=True)
         self.drive_DEC.set_position_sdo(posDEC)
         self.drive_HA.set_position_sdo(posHA)
         while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_HA.state !=  DriveState.TARGET_REACHED:
@@ -314,22 +320,24 @@ class Dish():
 
     def track(self, coord: SkyCoord, tracking_time: int, tracking_func= None):
         elapsed_time = 0
-        if tracking_time >= 30:
-            dt = 30
-        else:
-            dt = 10
+        dt = 5
         while elapsed_time < tracking_time:
             start_time = time.time()
             if tracking_func == None:
+                self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
                 self.move_to(coord)
             else:
                 observing_time = Time(datetime.datetime.now())
                 new_coord = tracking_func(observing_time)
+                self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
                 self.move_to(new_coord)
             self.drive_HA.set_velocity(self.earth_speed)
             self.wait(dt)
             end_time = time.time()
             elapsed_time += end_time - start_time
+        self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, 0, 4)
+        self.drive_HA.set_velocity(0)
+        print(bcolors.OKBLUE, f"Tracking completed", bcolors.ENDC)
     
     def add_task(self, action, *args, callback: Optional[Callable[[bool, Optional[int]], None]] = None) -> bool:
         """Queue a dish Task """
