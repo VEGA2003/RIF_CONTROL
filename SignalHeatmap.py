@@ -1,7 +1,7 @@
 import sys
 from PySide6 import QtCore, QtWidgets, QtGui
-from PySide6.QtCore import QThread, Signal, QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QTabWidget, QWidget, QLabel
+from PySide6.QtCore import QThread, Signal, QTimer, QObject
+from PySide6.QtWidgets import QApplication, QMainWindow, QVBoxLayout,QHBoxLayout, QTabWidget, QWidget, QLabel
 from PySide6.QtCharts import QPolarChart, QValueAxis, QChartView, QScatterSeries
 from TempWindow import tempGUI
 from SignalWindow import signalGUI
@@ -22,21 +22,13 @@ import astropy.units as u
 
 telescope_type = "virtual" # real or virtual
 # sdr_type = "virtual"  # pluto or virtual
-
+# observing_time = Time(datetime.datetime.now())
+observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
 class MainWindow(QMainWindow):
 
     heatmap_update = Signal(int)
     end_of_run = Signal()
-    update_position = Signal(int, int)
-    plot_position = Signal(int, int)
-
-    def position_callback(self, i, j):
-        print("change position")
-        ra = self.coords[i, j, 0] * u.radian
-        dec = self.coords[i, j, 1] * u.radian
-        coord = astropy.coordinates.SkyCoord(ra=ra.to(u.hourangle), dec=dec.to(u.degree))
-        self.telescope.dish_east.move_to(coord)
-        # print(coord)
+    plot_position = Signal(float, float)
 
     def __init__(self):
         super().__init__()
@@ -58,8 +50,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(convert)
         
         self.heatmap = pg.PlotWidget(labels={'left': 'DEC', 'bottom': 'RA'})
-        observing_time = Time(datetime.datetime.now())
         sun_coords = astropy.coordinates.get_sun(observing_time)
+        print(sun_coords)
         _, self.coords = pattern(sun_coords)
         image_array = np.zeros_like(self.coords)
         self.image_array = image_array[:, :, 0]
@@ -85,18 +77,26 @@ class MainWindow(QMainWindow):
         self.power = 0
         self.runs = 0
 
-        self.main_layout = QVBoxLayout()
+        self.main_layout = QHBoxLayout()
+        self.left_layout = QVBoxLayout()
         self.widget = QtWidgets.QWidget()
         self.widget.setLayout(self.main_layout)
         self.setCentralWidget(self.widget)
-        self.main_layout.addWidget(self.heatmap)
-        self.main_layout.addWidget(self.polar_plot)
+        self.main_layout.addLayout(self.left_layout)
+        self.left_layout.addWidget(self.heatmap)
+        self.left_layout.addWidget(self.polar_plot)
+        self.right_layout = QVBoxLayout()
+        self.main_layout.addLayout(self.right_layout)
+        self.right_layout.addWidget(self.label_HA)
+        self.right_layout.addWidget(self.label_DEC)
 
-        self.telescope = Telescope(telescope_type,bitrate=500000)
-        self.sdr = self.telescope.receiver.sdr
 
         def end_of_run_callback():
             QTimer.singleShot(0, self.run) # Run worker again immediately
+
+            
+        def end_of_measure_run_callback():
+            QTimer.singleShot(0, self.measure) # Run worker again immediately
 
         def heatmap_callback(signal):
             print(self.index_i, self.index_j)
@@ -108,46 +108,54 @@ class MainWindow(QMainWindow):
             #  data = np.random.randint(0,360, 2)
             # print((data/plotter.increments) % 1)
             #  self.polar_series.append(np.random.randint(0,360), 180)
-            self.label_HA.setText(str(ha))
-            self.label_DEC.setText(str(dec))
+            self.label_HA.setText(f"HA: {round(ha, 1)}")
+            self.label_DEC.setText(f"DEC: {round(dec, 1)}")
             # self.polar_series.remove(0)
             # self.polar_series.append(data , 180)
-            self.polar_scatter.setData([dec*np.cos(ha)], [dec*np.sin(ha)])
+            self.polar_scatter.setData([dec*np.cos(-ha*(2*np.pi/24)+(np.pi/2))], [dec*np.sin(-ha*(2*np.pi/24)+(np.pi/2))])
     
 
 
         self.heatmap_update.connect(heatmap_callback)
         self.end_of_run.connect(end_of_run_callback)
         self.plot_position.connect(plot_position_callback)
-        self.update_position.connect(self.position_callback)
-        self.telescope.start(skip_init=True)
-        # self.position_callback(0,0)
+        self.worker_thread = QThread()
+        self.worker = Worker()
+        self.worker.moveToThread(self.worker_thread)
+        self.worker.end_of_measure_run.connect(end_of_measure_run_callback)
+        self.worker.update_position.connect(self.worker.position_callback)
+        self.worker_thread.start()
+        self.sdr = self.worker.telescope.receiver.sdr
+        ra = self.coords[0, 0, 0] 
+        dec = self.coords[0, 0, 1]
+        self.worker.update_position.emit(ra,dec)
         self.start_t = 0
-
-        # First pass 
-        # self.update_position.emit(0,0)
         self.run()
 
 
 
     def run(self):
         # Main loop
-        print("loop")
+        position_HA = self.worker.telescope.dish_east.drive_HA.position
+        position_DEC = self.worker.telescope.dish_east.drive_DEC.position
+        coord = self.worker.telescope.dish_east.pos_to_coord(position_DEC, position_HA)
+        self.plot_position.emit(coord.ha.to(u.hourangle).value, coord.dec.to(u.degree).value)
+        self.end_of_run.emit()
+
+    def measure(self):
         now = time.time()
         sample = self.sdr.rx()
         self.power += np.sum(np.abs(np.array(sample)**2))
         self.runs += 1
-        position_HA = self.telescope.dish_east.drive_HA.position
-        position_DEC = self.telescope.dish_east.drive_DEC.position
-        coord = self.telescope.dish_east.pos_to_coord(position_HA, position_DEC)
-        self.plot_position.emit(position_HA, position_DEC)
-        if now > self.start_t + 10:
+
+        if now > self.worker.start_t + 10:
             self.heatmap_update.emit(self.power)
             self.runs = 0
             self.power = 0
             if self.scan:
                 self.index_j +=1
-                if self.index_i == len(self.coords[0]):
+                if self.index_j == len(self.coords[0]):
+                    self.index_j = 0 
                     self.index_i += 1
                     if self.index_i == len(self.coords[0]):
                         self.scan = False
@@ -156,14 +164,34 @@ class MainWindow(QMainWindow):
 
                 if self.scan:
                     # self.position_callback(self.index_i,self.index_j)
-                    self.update_position.emit(self.index_i,self.index_j)
-                    self.start_t = time.time()
+                    ra = self.coords[self.index_i, self.index_j, 0] 
+                    dec = self.coords[self.index_i, self.index_j, 1]
+                    self.worker.update_position.emit(ra,dec)
+        else:
+            self.worker.end_of_measure_run.emit()
 
 
-        self.end_of_run.emit()
 
 
+class Worker(QObject):
+    update_position = Signal(float, float)
+    end_of_measure_run = Signal()
+    def __init__(self):
+        super().__init__()
+        self.telescope = Telescope(telescope_type,bitrate=500000)
+        self.telescope.start(skip_init=True)
+        print("telescope started")
 
+    def position_callback(self, ra, dec):
+        ra_rad = ra* u.radian
+        dec_rad = dec* u.radian
+        coord = astropy.coordinates.SkyCoord(ra=ra_rad.to(u.hourangle), dec=dec_rad.to(u.degree))
+        print(f"change position: RA->{coord.ra} DEC->{coord.dec}")
+        self.telescope.dish_east.move_to(coord, observing_time)
+        self.start_t = time.time()
+        self.end_of_measure_run.emit()
+
+        # print(coord)
 
 
 
