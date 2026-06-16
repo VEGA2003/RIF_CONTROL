@@ -40,11 +40,9 @@ def pattern(coord):
             phi, theta = (coords[0][i, j], coords[1][i, j])
             r2 = np.quaternion(np.cos(theta/2), 0, np.sin(theta/2), 0) #dec
             r1 = np.quaternion(np.cos(phi/2), 0,0,np.sin(phi/2)) #ra
-            r4 = np.quaternion(b, b*x,b*y,b*z)
             q = r1*vector*r2.conjugate()
             q = r2*q*r1.conjugate()
             q = r3*q*r3.conjugate()
-            q = r4*q*r4.conjugate()
             rotation_array[i,j] = [q.x, q.y, q.z]
             coord_array[i, j] = [np.sign(q.y)*np.arccos(q.x/np.sqrt(q.x**2 + q.y**2)),np.pi/2 -np.arccos(q.z)]
 
