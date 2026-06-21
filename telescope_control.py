@@ -60,7 +60,15 @@ class Telescope():
         
         if self.virtual:
             self.virtual_telescope = VirtualTelescope(4)
-            
+            self.receiver = Receiver(virtual=True)
+        else:
+            try:
+                self.receiver = Receiver()
+            except Exception as e: 
+                print(e)
+                self.receiver = None
+                "no receiver connected"
+                
         self.request_queue = []
         # self.drives = [self.drive_HA, self.drive_DEC]
         # self.drives = [self.drive_HA]
@@ -76,12 +84,6 @@ class Telescope():
         self.running = False
         self.process_thread = None
         
-        # try:
-        #     self.receiver = Receiver()
-        # except Exception as e: 
-        #     print(e)
-        #     self.receiver = None
-        #     "no receiver connected"
         
     def start(self, skip_init=False):
         self.running = True
@@ -107,7 +109,7 @@ class Telescope():
             f"dish task queued for the Telescope, (queue length: {queue_length})")
         return True
     
-    def move_to(self, coord:SkyCoord, pos=None):
+    def move_to(self, coord:SkyCoord, follow = True, pos=None):
         self.dishes_in_position = 0
         for dish in self.dishes:
             dish.add_task(dish.move_to, coord, callback=self.move_to_followup)
@@ -186,16 +188,17 @@ class Receiver():
             self.sdr = VirtualSDR()
         else:
             self.sdr = adi.ad9361('ip:192.168.2.1')
-            self.sdr.rx_enabled_channels = [0, 1]
+            self.sdr.rx_enabled_channels = [0]
             self.sdr.gain_control_mode_chan0 = 'manual'
-            self.sdr.gain_control_mode_chan1 = 'manual'
+            # self.sdr.gain_control_mode_chan1 = 'manual'
             
-        self.sdr.rx_hardwaregain_chan0 = 70.0 # dB
-        self.sdr.rx_hardwaregain_chan1 = 70.0 # dB
-        self.sdr.rx_lo = int(80e6) # Hz
-        self.sdr.sample_rate = int(1e6) # Hz
-        self.sdr.rx_rf_bandwidth = int(1e6) # filter width, just set it to the same as sample rate for now
-        self.sdr.rx_buffer_size = 10000
+        self.sdr.rx_hardwaregain_chan0 = 10.0 # dB
+        # self.sdr.rx_hardwaregain_chan1 = 10.0 # dB
+        self.sdr.rx_lo = int(1420e6) # Hz
+        sample_rate = 5e6
+        self.sdr.sample_rate = int(sample_rate) # Hz
+        self.sdr.rx_rf_bandwidth = int(sample_rate*0.8) # filter width, just set it to the same as sample rate for now
+        self.sdr.rx_buffer_size = 4096
         
     def sample(self, output_path="output/data.csv", record_all_data= False):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -272,7 +275,6 @@ class Dish():
 
         # lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
         # ha = (lst - coord.ra).wrap_at(12*u.hourangle)
-        
         posDEC = int((coordHADec.dec.value*self.conversion_factor_DEC - self.dec_offset)*self.revolutions_to_increments)
         posHA = int((coordHADec.ha.value*self.conversion_factor_HA - self.ha_offset)*self.revolutions_to_increments)
         
@@ -281,13 +283,17 @@ class Dish():
     def pos_to_coord(self, posDEC,posHA, observing_time=None):
         coordDEC = ((posDEC/self.revolutions_to_increments) + self.dec_offset)/self.conversion_factor_DEC
         coordHA = ((posHA/self.revolutions_to_increments) + self.ha_offset)/self.conversion_factor_HA
-
+        # print(self.drive_DEC.target_position/self.revolutions_to_increments,posDEC/self.revolutions_to_increments, coordDEC)
         hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
         return hadec
         
-    def move_to(self, coord: SkyCoord, observing_time=None):
+    def move_to(self, coord: SkyCoord, observing_time=None, follow = False):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
         posDEC, posHA = self.coord_to_pos(coord, observing_time, transform=True)
+        if follow:
+            self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
+        else:
+            self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, 0, 4)
         self.drive_DEC.set_position_sdo(posDEC)
         self.drive_HA.set_position_sdo(posHA)
         while self.drive_DEC.state != DriveState.TARGET_REACHED or self.drive_HA.state !=  DriveState.TARGET_REACHED:
@@ -320,7 +326,7 @@ class Dish():
 
     def track(self, coord: SkyCoord, tracking_time: int, tracking_func= None):
         elapsed_time = 0
-        dt = 5
+        dt = 10
         while elapsed_time < tracking_time:
             start_time = time.time()
             if tracking_func == None:
