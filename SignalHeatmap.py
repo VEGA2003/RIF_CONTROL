@@ -20,13 +20,13 @@ from astropy.time import Time
 import astropy.units as u
 
 
-telescope_type = "virtual" # real or virtual
+telescope_type = "real" # real or virtual
 # sdr_type = "virtual"  # pluto or virtual
-# observing_time = Time(datetime.datetime.now())
-observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
+observing_time = Time(datetime.datetime.now())
+# observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
 class MainWindow(QMainWindow):
 
-    heatmap_update = Signal(int)
+    heatmap_update = Signal(int, int, int)
     end_of_run = Signal()
     plot_position = Signal(float, float)
 
@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle('RIF CONTROL :)')
         self.setGeometry(100, 100, 700, 400)
-
+        self.id = round(time.time())
         # if telescope_type == "virtual":
         #     self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
         # else:
@@ -61,8 +61,10 @@ class MainWindow(QMainWindow):
         self.imageitem = pg.ImageItem(self.image_array,axisOrder='row-major') # this arg is purely for performance
         self.heatmap.addItem(self.imageitem)
         self.heatmap.getViewBox().invertY(True)
+        bar = pg.ColorBarItem(values=(8000, 16000),width=30, colorMap="plasma") #default is 25
+        bar.setImageItem( self.imageitem, insert_in=self.heatmap.getPlotItem())
 
-        self.polar_plot = pg.PlotWidget()
+        self.polar_plot = pg.PlotWidget()   
         self.polar_scatter = pg.ScatterPlotItem()
         self.polar_plot.addItem(self.polar_scatter)
 
@@ -98,9 +100,8 @@ class MainWindow(QMainWindow):
         def end_of_measure_run_callback():
             QTimer.singleShot(0, self.measure) # Run worker again immediately
 
-        def heatmap_callback(signal):
-            print(self.index_i, self.index_j)
-            self.image_array[self.index_i, self.index_j] = signal
+        def heatmap_callback(signal, i, j):
+            self.image_array[i, j] = signal
             self.imageitem.setImage(self.image_array, autoLevels=False)
 
         def plot_position_callback(ha, dec):
@@ -149,17 +150,27 @@ class MainWindow(QMainWindow):
         self.runs += 1
 
         if now > self.worker.start_t + 10:
-            self.heatmap_update.emit(self.power)
+            self.heatmap_update.emit(self.power/self.runs, self.index_i, self.index_j)
+            ra = self.coords[self.index_i, self.index_j, 0] * u.radian
+            dec = self.coords[self.index_i, self.index_j, 1] * u.radian
+            with open(f'heatmap_data{self.id}.csv', 'a') as f:
+                np.savetxt(f, [[self.worker.start_t, self.power/self.runs, ra.to(u.hourangle).value, dec.to(u.degree).value]], delimiter=',')
             self.runs = 0
             self.power = 0
             if self.scan:
-                self.index_j +=1
-                if self.index_j == len(self.coords[0]):
-                    self.index_j = 0 
+                if self.index_i % 2 ==0:
+                    self.index_j +=1
+                else:
+                    self.index_j -=1
+                if self.index_j == len(self.coords[0]) or self.index_j == -1:
                     self.index_i += 1
+                    if self.index_i % 2 ==0:
+                        self.index_j += 1
+                    else:
+                        self.index_j -=1
                     if self.index_i == len(self.coords[0]):
                         self.scan = False
-                        with open('heatmap_data.csv', 'a') as f:
+                        with open(f'heatmap_image_data{self.id}.csv', 'a') as f:
                             np.savetxt(f, self.image_array, delimiter=',')
 
                 if self.scan:
@@ -187,7 +198,8 @@ class Worker(QObject):
         dec_rad = dec* u.radian
         coord = astropy.coordinates.SkyCoord(ra=ra_rad.to(u.hourangle), dec=dec_rad.to(u.degree))
         print(f"change position: RA->{coord.ra} DEC->{coord.dec}")
-        self.telescope.dish_east.move_to(coord, observing_time)
+        self.telescope.dish_east.move_to(coord)
+        print("reached position")
         self.start_t = time.time()
         self.end_of_measure_run.emit()
 
