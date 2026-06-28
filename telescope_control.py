@@ -195,7 +195,7 @@ class Receiver():
         self.sdr.rx_hardwaregain_chan0 = 10.0 # dB
         # self.sdr.rx_hardwaregain_chan1 = 10.0 # dB
         self.sdr.rx_lo = int(1420e6) # Hz
-        sample_rate = 5e6
+        sample_rate = 4e6
         self.sdr.sample_rate = int(sample_rate) # Hz
         self.sdr.rx_rf_bandwidth = int(sample_rate*0.8) # filter width, just set it to the same as sample rate for now
         self.sdr.rx_buffer_size = 4096
@@ -230,8 +230,11 @@ class Dish():
         # self.observing_location = EarthLocation(lat='51.82465', lon='5.86923333', height=20*u.m) #east  
         self.observing_location = EarthLocation(lat='51.82466667', lon='5.86875', height=27*u.m) #west
         self.revolutions_to_increments = 65536
-        self.dec_offset = 76.56
-        self.ha_offset = -827
+        # self.dec_offset = -76.56 + 0.2
+        # self.ha_offset = 827 + 5.91 
+        self.dec_offset = -76.56 - 0.9
+        self.ha_offset = 827 - 1.75
+
         self.conversion_factor_HA = -2430/24
         self.conversion_factor_DEC = -870/360
         self.earth_speed = int(self.conversion_factor_HA/3600 * self.revolutions_to_increments)  #increments a second
@@ -275,14 +278,14 @@ class Dish():
 
         # lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
         # ha = (lst - coord.ra).wrap_at(12*u.hourangle)
-        posDEC = int((coordHADec.dec.value*self.conversion_factor_DEC - self.dec_offset)*self.revolutions_to_increments)
-        posHA = int((coordHADec.ha.value*self.conversion_factor_HA - self.ha_offset)*self.revolutions_to_increments)
+        posDEC = int((coordHADec.dec.value*self.conversion_factor_DEC + self.dec_offset)*self.revolutions_to_increments)
+        posHA = int((coordHADec.ha.value*self.conversion_factor_HA + self.ha_offset)*self.revolutions_to_increments)
         
         return posDEC, posHA
     
     def pos_to_coord(self, posDEC,posHA, observing_time=None):
-        coordDEC = ((posDEC/self.revolutions_to_increments) + self.dec_offset)/self.conversion_factor_DEC
-        coordHA = ((posHA/self.revolutions_to_increments) + self.ha_offset)/self.conversion_factor_HA
+        coordDEC = ((posDEC/self.revolutions_to_increments) - self.dec_offset)/self.conversion_factor_DEC
+        coordHA = ((posHA/self.revolutions_to_increments) - self.ha_offset)/self.conversion_factor_HA
         # print(self.drive_DEC.target_position/self.revolutions_to_increments,posDEC/self.revolutions_to_increments, coordDEC)
         hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
         return hadec
