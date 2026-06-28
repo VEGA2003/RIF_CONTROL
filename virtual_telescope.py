@@ -8,24 +8,27 @@ import threading
 import numpy as np
 import math
 import struct
+from functions import *
 
 revolutions_to_increments = 65536
-
+can_bus_manager = CANBusManager(channel="test", interface="virtual")
+dt = 1
 class VirtualTelescope():
     def __init__(self, num_devices): 
-        self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
+        self.can_bus_manager = can_bus_manager
         self.devices = []
         self.num_devices = num_devices
         # Create 4 simulated drives
         for node_id in range(self.num_devices):
             dev = ARS2108Sim(node_id + 1, self.can_bus_manager)
             self.devices.append(dev)
+        self.temp_device = VirtualTemperature(5, self.can_bus_manager)
 
-        
     def start(self):
         for device in self.devices:
             device.start()
         self.can_bus_manager.start()
+        self.temp_device.start()
         print("Virtual telescope running...")
 
 
@@ -155,7 +158,7 @@ class ARS2108Sim:
     
     def _control_loop(self):
         """Main control loop with multiple control modes"""
-        dt = 1.0 / self.control_rate
+        # dt = 1.0 / self.control_rate
         next_time = time.time()
         cycle_count = 0 
         
@@ -208,7 +211,6 @@ class ARS2108Sim:
         )
         # Send velocity command
         self.velocity = velocity
-        print(velocity)
             
 
 
@@ -490,6 +492,63 @@ class VirtualSDR():
             np.clip(sample.imag, -1, 1, out=sample.imag)
             samples.append(sample)
         return np.squeeze(samples)
+    
+
+class VirtualTemperature():
+    def __init__(self, node_id, can_bus_manager):
+        self.can_bus_manager = can_bus_manager
+        self.can_bus_manager.add_handler(self)
+        self.node_id = node_id
+        self.temp_H = 20
+        self.temp_L = 0
+        self.output = 0
+        self.temp_board = 0
+        self.lna_on = 1
+        self.control_on = 1
+        self.p_gain = 100
+        self.i_gain = 2
+        self.d_gain = 0
+    
+    def _control_loop(self):
+        while True:
+            time.sleep(dt)
+            self.temp_H = np.random.randint(20,25)
+            self.temp_L = np.random.randint(20,25)
+            self.output = np.random.randint(-4, 6)
+            self.send_temp()
+            print(self.output)
+            self.send_output()
+
+    def start(self):     
+        self.control_thread = threading.Thread(target=self._control_loop, daemon=True)
+        self.control_thread.start()
+
+    def can_handle_message(self, message: can.Message) -> bool:
+        """Check if this message belongs to this drive"""
+        cob_id = message.arbitration_id
+        return cob_id in [0x110 + self.node_id, 0x310 + self.node_id]
+        
+    def handle_message(self, message: can.Message):
+        """Handle CAN message for this drive"""
+        cob_id = message.arbitration_id
+        data = message.data
+        # if cob_id == 0x100 + self.node_id:
+        #     self.temp_L = (data[0] + data[1]*256)
+        #     self.temp_H = (data[4] + data[5]*256)
+        # elif cob_id == 0x200 + self.node_id:
+        #     self.temp_board = (data[4] + data[5]*256)
+        # elif cob_id == 0x300 + self.node_id:
+        #     self.output = (data[0] + data[1]*256)-0x84E7
+
+    def send_temp(self):
+        temp_data = struct.pack('<ll', adc_conv(self.temp_L), adc_conv(self.temp_H))
+        response = can.Message(arbitration_id=0x100 + self.node_id, data=temp_data, is_extended_id=False)
+        self.can_bus_manager.send_message(response)
+    
+    def send_output(self):
+        v_data = struct.pack('<ll', dac_conv(self.output),0)
+        response = can.Message(arbitration_id=0x300 + self.node_id, data=v_data, is_extended_id=False)
+        self.can_bus_manager.send_message(response)
     
 
 if __name__ == '__main__':

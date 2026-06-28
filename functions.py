@@ -3,7 +3,6 @@ import numpy as np
 import datetime
 import matplotlib.pyplot as plt
 import matplotlib as mlb
-from ipywidgets import interact
 from astropy.coordinates import Galactic, ICRS
 from astropy.coordinates import SkyCoord
 import astropy.coordinates as coords
@@ -57,3 +56,23 @@ def import_survey(path):
 
 def get_spectrum(signal_0, signal_1):
     pass
+
+
+def temp_conv(adc):
+     """
+     Convert ADC counts to temperatur in degrees Celsius
+     """
+     temp = 1.71234271e-02 * adc -1.91247311e+01
+     return round(temp, 1)
+
+def adc_conv(temp):
+     """
+     Convert degrees Celcius to ADC counts
+     """
+     return round((temp + 1.91247311e+01)/(1.71234271e-02))
+
+def voltage_conv(dac, offset = 0x84E7):
+    return round((dac - offset) * -0.000149, 1)
+
+def dac_conv(v, offset = 0x84E7):
+    return round((v / -0.000149) + offset)
