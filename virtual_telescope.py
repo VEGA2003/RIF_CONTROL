@@ -6,6 +6,10 @@ from dataclasses import dataclass
 import math
 import threading
 import numpy as np
+import math
+import struct
+
+revolutions_to_increments = 65536
 
 class VirtualTelescope():
     def __init__(self, num_devices): 
@@ -30,8 +34,8 @@ class ARS2108Sim:
         self.control_word = 0
         self.status_word = 0x0040  # Switch on disabled
         self.target_position = 0
-        self.actual_position = 0
-        self.actual_velocity = 0
+        self.position = 0
+        self.velocity = 0
         self.control_mode = ControlMode.POSITIONING  # Profile Position
         self.node_id = node_id
         self.can_bus_manager = can_bus_manager
@@ -39,7 +43,7 @@ class ARS2108Sim:
         self.time = 0
         self.state = DriveState.SWITCHED_ON
         # Control parameters - Keep high rate but make controller gentler
-        self.control_rate = 100.0  # Keep 100 Hz for good tracking
+        self.control_rate = 1  # Keep 100 Hz for good tracking
 
         # PID controllers for each drive - VERY small gains with rate limiting
         self.pid_controller = PIDController(kp=0.1, ki=0.0, kd=0.0, kv=1.0)
@@ -79,7 +83,7 @@ class ARS2108Sim:
             return self.status_word
 
         elif index == 0x6064:
-            return self.actual_position
+            return self.position
 
         elif index == 0x6061:
             return self.control_mode
@@ -127,7 +131,7 @@ class ARS2108Sim:
 
         # WRITE request
         if cmd in (0x23, 0x2B, 0x2F):
-            value = int.from_bytes(data[4:8], "little")
+            value = int.from_bytes(data[4:8], "little", signed=True)
             self.write_object(index, sub, value)
 
             # send SDO response
@@ -143,6 +147,10 @@ class ARS2108Sim:
             response = can.Message(arbitration_id=0x580 + self.node_id, data=response_data, is_extended_id=False)
             self.can_bus_manager.send_message(response)
             
+    def send_pdo(self):
+        message = struct.pack('<Hl', self.status_word, int(self.position))
+        pdo = can.Message(arbitration_id=0x380 + self.node_id, data=message, is_extended_id=False)
+        self.can_bus_manager.send_message(pdo)
         
     
     def _control_loop(self):
@@ -159,35 +167,48 @@ class ARS2108Sim:
             # Execute control based on current mode
             if self.control_mode == ControlMode.DISABLED:
                 # Send zero velocity to all drives
-                for drive in self.drives.values():
+                for drive in self.devices:
                     drive.set_velocity(0)
 
             elif self.control_mode == ControlMode.POSITIONING:
-                self._update_positioning_mode(dt)
+                # print(self.target_position, self.actual_position)
+                # self._update_positioning_mode(dt)
+                error = self.target_position - self.position
+                if abs(error) < 2 * revolutions_to_increments:
+                    self.velocity = 0
+                    self.status_word = 0x0400
+                else: 
+                    self.velocity = 2 * revolutions_to_increments * math.copysign(1, error)
+                    self.status_word = 0x0040
+                # print(f"{self.node_id}, {error/revolutions_to_increments},{self.target_position}, {self.position}, {self.velocity/revolutions_to_increments} ")
             
             # elif self.control_mode == ControlMode.TRACKING:
             #     self._update_tracking_mode(dt)
-            self.actual_position += self.actual_velocity * dt
+            self.position += self.velocity * dt
+            # print(f"node: {self.node_id}", self.position)
             self.time += dt
-            error = abs(self.actual_position - self.target_position) 
-            if error <= 300 and self.state == DriveState.MOVING:
-                print("statuso",self.status_word & 0x0400)
-                self.status_word = self.status_word | 0x0400
-                print("statuss",self.status_word & 0x0400)
-                print("error: ", error)
+            self.send_pdo()
+            time.sleep(0.01 * dt)
+            # print("error:", error)
+            # if error <= 300 and self.state == DriveState.MOVING:
+            #     print("statuso",self.status_word & 0x0400)
+            #     self.status_word = self.status_word | 0x0400
+            #     print("statuss",self.status_word & 0x0400)
+            #     print("error: ", error)
 
     def _update_positioning_mode(self, dt: float):
         """Update positioning mode - move to static targets"""
         # PID control
         velocity = self.pid_controller.update(
             desired_position=self.target_position,
-            actual_position=self.actual_position,
-            actual_velocity=self.actual_velocity,
+            actual_position=self.position,
+            actual_velocity=self.velocity,
             desired_velocity=0.0,
             dt=dt
         )
         # Send velocity command
-        self.actual_velocity = velocity
+        self.velocity = velocity
+        print(velocity)
             
 
 
@@ -201,7 +222,7 @@ class PIDController:
     kv: float = 1.0  # Velocity feedforward gain
 
     # Rate limiting (THE KEY TO STABILITY)
-    max_velocity_change: float = 500000.0  # 5 RPM change per 10ms cycle
+    max_velocity_change: float = 0.5*revolutions_to_increments  
 
     # Internal state
     integral: float = 0.0
@@ -215,7 +236,7 @@ class PIDController:
     filter_length: int = 3  # Light filtering
 
     # Limits
-    output_limit: float = 10922666  # 100 RPM in increments/sec
+    output_limit: float = 1 * revolutions_to_increments  # 240 RPM in increments/sec
     integral_limit: float = 50000.0
 
     # Dead zone to prevent hunting
@@ -256,9 +277,9 @@ class PIDController:
         # Check for sudden large position error changes
         if hasattr(self, 'last_position_error'):
             error_change = abs(position_error - self.last_position_error)
-            if error_change > 1000000:  # Large position error change
-                print(f"WARNING: Large position error change: {error_change:.0f} counts")
-                print(f"  Previous error: {self.last_position_error:.0f}, Current error: {position_error:.0f}")
+            # if error_change > 1000000:  # Large position error change
+            #     print(f"WARNING: Large position error change: {error_change:.0f} counts")
+            #     print(f"  Previous error: {self.last_position_error:.0f}, Current error: {position_error:.0f}")
         self.last_position_error = position_error
 
         # Dead zone - don't control tiny errors
@@ -291,9 +312,9 @@ class PIDController:
         p_term = self.kp * filtered_error
 
         # Check for large P term that could cause spikes
-        p_term_rpm = p_term / 109226.67
-        if abs(p_term_rpm) > 20:
-            print(f"WARNING: Large P term: {p_term_rpm:.1f} RPM from error {filtered_error:.0f}")
+        p_term_rpm = p_term / (revolutions_to_increments * 60)
+        # if abs(p_term_rpm) > 20:
+        #     print(f"WARNING: Large P term: {p_term_rpm:.1f} RPM from error {filtered_error:.0f}")
 
         # Derivative term (only if Kd > 0 and we have history)
         d_term = 0.0
@@ -303,9 +324,9 @@ class PIDController:
             d_term = self.kd * error_derivative
 
             # Check for large D term
-            d_term_rpm = d_term / 109226.67
-            if abs(d_term_rpm) > 20:
-                print(f"WARNING: Large D term: {d_term_rpm:.1f} RPM from derivative {error_derivative:.0f}")
+            d_term_rpm = d_term / (revolutions_to_increments * 60)
+            # if abs(d_term_rpm) > 20:
+            #     print(f"WARNING: Large D term: {d_term_rpm:.1f} RPM from derivative {error_derivative:.0f}")
 
         # Velocity feedforward
         feedforward = self.kv * desired_velocity
@@ -329,9 +350,9 @@ class PIDController:
                 self.integral = -self.integral_limit
 
             i_term = self.ki * self.integral
-            i_term_rpm = i_term / 109226.67
-            if abs(i_term_rpm) > 20:
-                print(f"WARNING: Large I term: {i_term_rpm:.1f} RPM from integral {self.integral:.0f}")
+            i_term_rpm = i_term / (revolutions_to_increments * 60)
+            # if abs(i_term_rpm) > 20:
+            #     print(f"WARNING: Large I term: {i_term_rpm:.1f} RPM from integral {self.integral:.0f}")
 
             desired_output += i_term
 
@@ -340,9 +361,9 @@ class PIDController:
 
         # DEBUG: Check if rate limiting is being triggered
         if abs(velocity_change) > self.max_velocity_change:
-            change_rpm = velocity_change / 109226.67
-            limit_rpm = self.max_velocity_change / 109226.67
-            print(f"RATE LIMITING: Wanted change of {change_rpm:.1f} RPM, limited to {limit_rpm:.1f} RPM")
+            change_rpm = velocity_change / (revolutions_to_increments * 60)
+            limit_rpm = self.max_velocity_change / (revolutions_to_increments * 60)
+            # print(f"RATE LIMITING: Wanted change of {change_rpm:.1f} RPM, limited to {limit_rpm:.1f} RPM")
             velocity_change = math.copysign(self.max_velocity_change, velocity_change)
 
         # Calculate new output with rate limiting
@@ -356,25 +377,25 @@ class PIDController:
         if len(self.output_history) >= self.filter_length:
             filtered_command = sum(self.output_history) / len(self.output_history)
             # Check if filtering makes a big difference
-            filter_diff = abs(filtered_command - velocity_command) / 109226.67
-            if filter_diff > 5:
-                print(f"OUTPUT FILTERING: Changed command by {filter_diff:.1f} RPM")
+            filter_diff = abs(filtered_command - velocity_command) / (revolutions_to_increments * 60)
+            # if filter_diff > 5:
+            #     print(f"OUTPUT FILTERING: Changed command by {filter_diff:.1f} RPM")
             velocity_command = filtered_command
 
         # Apply absolute output limits
         if velocity_command > self.output_limit:
-            print(
-                f"OUTPUT LIMITING: Command {velocity_command / 109226.67:.1f} RPM limited to {self.output_limit / 109226.67:.1f} RPM")
+            # print(
+                # f"OUTPUT LIMITING: Command {velocity_command / (revolutions_to_increments * 60):.1f} RPM limited to {self.output_limit / (revolutions_to_increments * 60):.1f} RPM")
             velocity_command = self.output_limit
         elif velocity_command < -self.output_limit:
-            print(
-                f"OUTPUT LIMITING: Command {velocity_command / 109226.67:.1f} RPM limited to {-self.output_limit / 109226.67:.1f} RPM")
+            # print(
+                # f"OUTPUT LIMITING: Command {velocity_command / (revolutions_to_increments * 60):.1f} RPM limited to {-self.output_limit / (revolutions_to_increments * 60):.1f} RPM")
             velocity_command = -self.output_limit
 
         # Store for next iteration
         self.last_output = velocity_command
         self.last_error = position_error
-
+        # print(self.output_limit, velocity_command)
         return velocity_command
 
     def set_limits(self, max_velocity_rpm: float):
@@ -387,7 +408,7 @@ class PIDController:
 
     def set_rate_limit(self, max_change_rpm: float):
         """Set maximum velocity change per control cycle (THIS IS KEY!)"""
-        self.max_velocity_change = max_change_rpm * 65536 * 100 / 60
+        self.max_velocity_change = max_change_rpm * revolutions_to_increments / 60
         print(f"Rate limit set to {max_change_rpm} RPM per cycle ({self.max_velocity_change:.0f} increments/sec/cycle)")
 
 
@@ -469,3 +490,12 @@ class VirtualSDR():
             np.clip(sample.imag, -1, 1, out=sample.imag)
             samples.append(sample)
         return np.squeeze(samples)
+    
+
+if __name__ == '__main__':
+    tele = VirtualTelescope(1)
+    tele.devices[0].running = True
+    control_thread = threading.Thread(target=tele.devices[0]._control_loop, daemon=False)
+    tele.can_bus_manager.start()
+    control_thread.start()
+    tele.devices[0].target_position = 100 * revolutions_to_increments
