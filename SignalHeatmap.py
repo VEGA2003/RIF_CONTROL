@@ -19,11 +19,13 @@ import datetime
 from astropy.time import Time
 import astropy.units as u
 
-
+revolutions_to_increments = 65536
 telescope_type = "real" # real or virtual
 # sdr_type = "virtual"  # pluto or virtual
 observing_time = Time(datetime.datetime.now())
 # observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
+freqs =   np.array([1420], dtype=int) * 1e6 # Hz
+integration_time = 5
 class MainWindow(QMainWindow):
 
     heatmap_update = Signal(int, int, int)
@@ -48,7 +50,8 @@ class MainWindow(QMainWindow):
         convert = styleFile.readAll().toStdString()
         #set stylesheet
         self.setStyleSheet(convert)
-        
+        self.freq = int(freqs[0])
+        print(f"type: {type(self.freq)}")
         self.heatmap = pg.PlotWidget(labels={'left': 'DEC', 'bottom': 'RA'})
         sun_coords = astropy.coordinates.get_sun(observing_time)
         print(sun_coords)
@@ -57,11 +60,12 @@ class MainWindow(QMainWindow):
         self.image_array = image_array[:, :, 0]
         self.index_i = 0
         self.index_j = 0
+        self.index_k = 0
         self.scan = True
         self.imageitem = pg.ImageItem(self.image_array,axisOrder='row-major') # this arg is purely for performance
         self.heatmap.addItem(self.imageitem)
         self.heatmap.getViewBox().invertY(True)
-        bar = pg.ColorBarItem(values=(8000, 16000),width=30, colorMap="plasma") #default is 25
+        bar = pg.ColorBarItem(values=(5000, 16000),width=30, colorMap="plasma") #default is 25
         bar.setImageItem( self.imageitem, insert_in=self.heatmap.getPlotItem())
 
         self.polar_plot = pg.PlotWidget()   
@@ -75,6 +79,7 @@ class MainWindow(QMainWindow):
         
         self.label_HA = QLabel(text="---")
         self.label_DEC = QLabel(text="---")
+        self.label_freq = QLabel(text=f"FREQ: {round(self.freq/1e6)} MHz")
 
         self.power = 0
         self.runs = 0
@@ -89,6 +94,7 @@ class MainWindow(QMainWindow):
         self.left_layout.addWidget(self.polar_plot)
         self.right_layout = QVBoxLayout()
         self.main_layout.addLayout(self.right_layout)
+        self.right_layout.addWidget(self.label_freq)
         self.right_layout.addWidget(self.label_HA)
         self.right_layout.addWidget(self.label_DEC)
 
@@ -127,6 +133,7 @@ class MainWindow(QMainWindow):
         self.worker.update_position.connect(self.worker.position_callback)
         self.worker_thread.start()
         self.sdr = self.worker.telescope.receiver.sdr
+        self.sdr.rx_lo = self.freq
         ra = self.coords[0, 0, 0] 
         dec = self.coords[0, 0, 1]
         self.worker.update_position.emit(ra,dec)
@@ -139,8 +146,8 @@ class MainWindow(QMainWindow):
         # Main loop
         position_HA = self.worker.telescope.dish_east.drive_HA.position
         position_DEC = self.worker.telescope.dish_east.drive_DEC.position
-        coord = self.worker.telescope.dish_east.pos_to_coord(position_DEC, position_HA)
-        self.plot_position.emit(coord.ha.to(u.hourangle).value, coord.dec.to(u.degree).value)
+        # coord = self.worker.telescope.dish_east.pos_to_coord(position_DEC, position_HA)
+        # self.plot_position.emit(coord.ha.to(u.hourangle).value, coord.dec.to(u.degree).value)
         self.end_of_run.emit()
 
     def measure(self):
@@ -148,36 +155,47 @@ class MainWindow(QMainWindow):
         sample = self.sdr.rx()
         self.power += np.sum(np.abs(np.array(sample)**2))
         self.runs += 1
-
-        if now > self.worker.start_t + 10:
-            self.heatmap_update.emit(self.power/self.runs, self.index_i, self.index_j)
+        if now > self.worker.start_t + integration_time:
             ra = self.coords[self.index_i, self.index_j, 0] * u.radian
             dec = self.coords[self.index_i, self.index_j, 1] * u.radian
-            with open(f'heatmap_data{self.id}.csv', 'a') as f:
-                np.savetxt(f, [[self.worker.start_t, self.power/self.runs, ra.to(u.hourangle).value, dec.to(u.degree).value]], delimiter=',')
+            signal = self.power/self.runs
+            with open(f'heatmap_data_{self.id}_{round(self.freq/1e6)}.csv', 'a') as f:
+                np.savetxt(f, [[self.worker.start_t, signal, ra.to(u.hourangle).value, dec.to(u.degree).value]], delimiter=',')
             self.runs = 0
             self.power = 0
+            self.index_k += 1
             if self.scan:
-                if self.index_i % 2 ==0:
-                    self.index_j +=1
-                else:
-                    self.index_j -=1
-                if self.index_j == len(self.coords[0]) or self.index_j == -1:
-                    self.index_i += 1
+                if self.index_k == len(freqs):
+                    self.heatmap_update.emit(signal, self.index_i, self.index_j)
+                    self.index_k = 0
+                    self.freq = int(freqs[self.index_k])
+                    self.sdr.rx_lo = self.freq
+                    self.label_freq.setText(f"FREQ: {round(self.freq/1e6)} MHz")
                     if self.index_i % 2 ==0:
-                        self.index_j += 1
+                        self.index_j +=1
                     else:
                         self.index_j -=1
-                    if self.index_i == len(self.coords[0]):
-                        self.scan = False
-                        with open(f'heatmap_image_data{self.id}.csv', 'a') as f:
-                            np.savetxt(f, self.image_array, delimiter=',')
-
-                if self.scan:
-                    # self.position_callback(self.index_i,self.index_j)
-                    ra = self.coords[self.index_i, self.index_j, 0] 
-                    dec = self.coords[self.index_i, self.index_j, 1]
-                    self.worker.update_position.emit(ra,dec)
+                    if self.index_j == len(self.coords[0]) or self.index_j == -1:
+                        self.index_i += 1
+                        if self.index_i % 2 ==0:
+                            self.index_j += 1
+                        else:
+                            self.index_j -=1
+                        if self.index_i == len(self.coords[0]):
+                            self.scan = False
+                            with open(f'heatmap_image_data{self.id}.csv', 'a') as f:
+                                np.savetxt(f, self.image_array, delimiter=',')
+                    if self.scan:
+                        # self.position_callback(self.index_i,self.index_j)
+                        ra = self.coords[self.index_i, self.index_j, 0] 
+                        dec = self.coords[self.index_i, self.index_j, 1]
+                        self.worker.update_position.emit(ra,dec)
+                else:
+                    self.freq = int(freqs[self.index_k])
+                    self.sdr.rx_lo = self.freq
+                    self.label_freq.setText(f"FREQ: {round(self.freq/1e6)} MHz")
+                    self.worker.start_t = time.time()
+                    self.worker.end_of_measure_run.emit()
         else:
             self.worker.end_of_measure_run.emit()
 
@@ -191,6 +209,7 @@ class Worker(QObject):
         super().__init__()
         self.telescope = Telescope(telescope_type,bitrate=500000)
         self.telescope.start(skip_init=True)
+
         print("telescope started")
 
     def position_callback(self, ra, dec):
@@ -199,6 +218,7 @@ class Worker(QObject):
         coord = astropy.coordinates.SkyCoord(ra=ra_rad.to(u.hourangle), dec=dec_rad.to(u.degree))
         print(f"change position: RA->{coord.ra} DEC->{coord.dec}")
         self.telescope.dish_east.move_to(coord)
+        self.telescope
         print("reached position")
         self.start_t = time.time()
         self.end_of_measure_run.emit()
