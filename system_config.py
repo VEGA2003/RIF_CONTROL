@@ -87,6 +87,7 @@ class ARS2108System():
         self.position = 0
         self.node_id = node_id
         self.init_steps = self.set_init_steps()
+        self.target_position = 0 
         self.r = 65536
         # Initialize CAN bus and managers
         # self.state
@@ -304,7 +305,7 @@ class ARS2108System():
             # TPDO2: Velocity + Torque
             self._process_tpdo2(message.data)
         elif cob_id == 0x380 + self.node_id:
-            # TPDO2: Velocity + Torque
+            # TPDO2: Status + Position
             self._process_tpdo3(message.data)
             
     def _process_tpdo1(self, data: bytes):
@@ -412,9 +413,9 @@ class ARS2108System():
         
         if mode == ControlMode.POSITIONING:
             self.sdo_manager.write_sdo(self.node_id, 0x6060, 0x00, 1, 1)  # Positioning mode
-            self.sdo_manager.write_sdo(self.node_id,0x6081, 0x00, 2*self.r, 4)
+            self.sdo_manager.write_sdo(self.node_id,0x6081, 0x00, 2*self.r, 4) #profile_velocity
             # self.sdo_manager.write_sdo(self.node_id,0x6082, 0x00, 0, 4)
-            # self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, int(0.01*self.r), 1)
+            self.sdo_manager.write_sdo(self.node_id, 0x6084, 0x00, int(0.1*self.r), 4) #profile_deceleration
             # self.sdo_manager.write_sdo(self.node_id, 0x6084, 0x00, int(0.01*self.r), 1)
             # self.sdo_manager.write_sdo(self.node_id, 0x6083, 0x00, 120000, 1)
 
@@ -428,7 +429,7 @@ class ARS2108System():
         control_word = (ControlWord.ENABLE_VOLTAGE | ControlWord.QUICK_STOP |
                 ControlWord.SWITCH_ON | ControlWord.ENABLE_OPERATION)
         data = struct.pack('<Hi', control_word, self.velocity)
-        message = can.Message(arbitration_id=0x200 + 1, data=data, is_extended_id=False)
+        message = can.Message(arbitration_id=0x200 + self.node_id, data=data, is_extended_id=False)
         self.can_bus_manager.send_message(message)
         # while self.status_word & 0x0400:
         #     print("waiting for acceleration")
@@ -466,6 +467,7 @@ class ARS2108System():
         print(bcolors.OKBLUE + f"position set to {position}" + bcolors.ENDC)
         
     def set_position_sdo(self, position, now = False, wait=None):
+        self.target_position = position
         if self.control_mode != ControlMode.POSITIONING: 
             self.set_control_mode(ControlMode.POSITIONING)
         
