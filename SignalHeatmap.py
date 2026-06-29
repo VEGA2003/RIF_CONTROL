@@ -24,13 +24,13 @@ telescope_type = "real" # real or virtual
 # sdr_type = "virtual"  # pluto or virtual
 observing_time = Time(datetime.datetime.now())
 # observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
-freqs =   np.array([1420], dtype=int) * 1e6 # Hz
+freqs =   np.array([1400], dtype=int) * 1e6 # Hz
 integration_time = 5
 class MainWindow(QMainWindow):
 
     heatmap_update = Signal(int, int, int)
     end_of_run = Signal()
-    plot_position = Signal(float, float)
+    plot_position = Signal(float, float, float)
 
     def __init__(self):
         super().__init__()
@@ -65,7 +65,7 @@ class MainWindow(QMainWindow):
         self.imageitem = pg.ImageItem(self.image_array,axisOrder='row-major') # this arg is purely for performance
         self.heatmap.addItem(self.imageitem)
         self.heatmap.getViewBox().invertY(True)
-        bar = pg.ColorBarItem(values=(5000, 16000),width=30, colorMap="plasma") #default is 25
+        bar = pg.ColorBarItem(values=(8000, 16000),width=30, colorMap="plasma") #default is 25
         bar.setImageItem( self.imageitem, insert_in=self.heatmap.getPlotItem())
 
         self.polar_plot = pg.PlotWidget()   
@@ -80,7 +80,7 @@ class MainWindow(QMainWindow):
         self.label_HA = QLabel(text="---")
         self.label_DEC = QLabel(text="---")
         self.label_freq = QLabel(text=f"FREQ: {round(self.freq/1e6)} MHz")
-
+        self.label_temp = QLabel(text=f"TEMP: --- °C")
         self.power = 0
         self.runs = 0
 
@@ -95,8 +95,10 @@ class MainWindow(QMainWindow):
         self.right_layout = QVBoxLayout()
         self.main_layout.addLayout(self.right_layout)
         self.right_layout.addWidget(self.label_freq)
+        self.right_layout.addWidget(self.label_temp)
         self.right_layout.addWidget(self.label_HA)
         self.right_layout.addWidget(self.label_DEC)
+        
 
 
         def end_of_run_callback():
@@ -110,13 +112,14 @@ class MainWindow(QMainWindow):
             self.image_array[i, j] = signal
             self.imageitem.setImage(self.image_array, autoLevels=False)
 
-        def plot_position_callback(ha, dec):
+        def plot_position_callback(ha, dec, temp):
             #  print(QThread.currentThread())
             #  data = np.random.randint(0,360, 2)
             # print((data/plotter.increments) % 1)
             #  self.polar_series.append(np.random.randint(0,360), 180)
             self.label_HA.setText(f"HA: {round(ha, 1)}")
             self.label_DEC.setText(f"DEC: {round(dec, 1)}")
+            self.label_temp.setText(f"TEMP: {temp} °C")
             # self.polar_series.remove(0)
             # self.polar_series.append(data , 180)
             self.polar_scatter.setData([dec*np.cos(-ha*(2*np.pi/24)+(np.pi/2))], [dec*np.sin(-ha*(2*np.pi/24)+(np.pi/2))])
@@ -146,8 +149,9 @@ class MainWindow(QMainWindow):
         # Main loop
         position_HA = self.worker.telescope.dish_east.drive_HA.position
         position_DEC = self.worker.telescope.dish_east.drive_DEC.position
-        # coord = self.worker.telescope.dish_east.pos_to_coord(position_DEC, position_HA)
-        # self.plot_position.emit(coord.ha.to(u.hourangle).value, coord.dec.to(u.degree).value)
+        temp = self.worker.telescope.dish_east.temp_device.temp_H
+        coord = self.worker.telescope.dish_east.pos_to_coord(position_DEC, position_HA)
+        self.plot_position.emit(coord.ha.to(u.hourangle).value, coord.dec.to(u.degree).value, temp)
         self.end_of_run.emit()
 
     def measure(self):
