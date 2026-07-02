@@ -76,3 +76,38 @@ def voltage_conv(dac, offset = 0x84E7):
 
 def dac_conv(v, offset = 0x84E7):
     return round((v / -0.000149) + offset)
+
+def sky_survey(n, direction=1):
+    nside = 2**n
+    hp = HEALPix(nside=nside, order='ring', frame=ICRS())
+    points = np.arange(hpp.nside2npix(nside))
+    sky_coords = hp.healpix_to_skycoord(points)
+
+    ra = coords.Angle(sky_coords.ra)
+    ra = ra + 5.5 * u.hourangle
+    ra = ra.wrap_at(180 * u.degree)
+    dec = coords.Angle(sky_coords.dec)
+
+    index = np.argwhere((ra.hourangle >= -5)&(ra.hourangle <5)&(dec.degree>0)&(dec.degree<=30))
+    ra = direction * ra[index]
+    dec = dec[index]
+    current_dec = dec[0].radian
+
+    index = []
+    k = 0
+    j = 0
+    for i in range(len(ra.radian)):
+        if dec.radian[i] != current_dec:
+            if dec.deg[i] < 0:
+                break
+            j +=1
+            current_dec = dec.radian[i]
+            k = i
+        if j %2==0:
+            index.append(i)
+        else:
+            index.insert(k,i)
+
+    ra = ra[index]
+    dec = dec[index]
+    return ra.radian, dec.radian
