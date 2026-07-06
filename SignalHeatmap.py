@@ -22,9 +22,9 @@ import astropy.units as u
 revolutions_to_increments = 65536
 telescope_type = "real" # real or virtual
 # sdr_type = "virtual"  # pluto or virtual
-observing_time = Time(datetime.datetime.now())
+observing_time = Time(datetime.datetime.now(datetime.UTC))
 # observing_time = Time(datetime.datetime(2026, 6, 16, 9, 0))
-freqs =   np.array([1400], dtype=int) * 1e6 # Hz
+freqs =   np.array([1420], dtype=int) * 1e6 # Hz
 integration_time = 5
 class MainWindow(QMainWindow):
 
@@ -37,11 +37,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('RIF CONTROL :)')
         self.setGeometry(100, 100, 700, 400)
         self.id = round(time.time())
-        # if telescope_type == "virtual":
-        #     self.can_bus_manager = CANBusManager(channel="test", interface="virtual")
-        # else:
-        #     self.can_bus_manager = CANBusManager(bitrate = 500000, channel= "PCAN_USBBUS1")
-
         #load file
         styleFile = QtCore.QFile('style.css')
         #set file mode 
@@ -65,7 +60,7 @@ class MainWindow(QMainWindow):
         self.imageitem = pg.ImageItem(self.image_array,axisOrder='row-major') # this arg is purely for performance
         self.heatmap.addItem(self.imageitem)
         self.heatmap.getViewBox().invertY(True)
-        bar = pg.ColorBarItem(values=(8000, 16000),width=30, colorMap="plasma") #default is 25
+        bar = pg.ColorBarItem(values=(6000, 16000),width=30, colorMap="plasma") #default is 25
         bar.setImageItem( self.imageitem, insert_in=self.heatmap.getPlotItem())
 
         self.polar_plot = pg.PlotWidget()   
@@ -113,15 +108,9 @@ class MainWindow(QMainWindow):
             self.imageitem.setImage(self.image_array, autoLevels=False)
 
         def plot_position_callback(ha, dec, temp):
-            #  print(QThread.currentThread())
-            #  data = np.random.randint(0,360, 2)
-            # print((data/plotter.increments) % 1)
-            #  self.polar_series.append(np.random.randint(0,360), 180)
             self.label_HA.setText(f"HA: {round(ha, 1)}")
             self.label_DEC.setText(f"DEC: {round(dec, 1)}")
             self.label_temp.setText(f"TEMP: {temp} °C")
-            # self.polar_series.remove(0)
-            # self.polar_series.append(data , 180)
             self.polar_scatter.setData([dec*np.cos(-ha*(2*np.pi/24)+(np.pi/2))], [dec*np.sin(-ha*(2*np.pi/24)+(np.pi/2))])
     
 
@@ -212,7 +201,7 @@ class Worker(QObject):
     def __init__(self):
         super().__init__()
         self.telescope = Telescope(telescope_type,bitrate=500000)
-        self.telescope.start(skip_init=True)
+        self.telescope.start(skip_init=False)
 
         print("telescope started")
 
