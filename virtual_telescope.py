@@ -516,7 +516,6 @@ class VirtualTemperature():
             self.temp_L = np.random.randint(20,25)
             self.output = np.random.randint(-4, 6)
             self.send_temp()
-            print(self.output)
             self.send_output()
 
     def start(self):     
