@@ -14,7 +14,9 @@ from can_bus_manager import CANBusManager
 import adi
 import os
 import csv
-from virtual_telescope import VirtualTelescope, VirtualSDR
+import can
+from functions import *
+from virtual_telescope import VirtualTelescope, VirtualSDR, VirtualTemperature
 
 class ComponentState(Enum):
     IDLE = auto()
@@ -186,6 +188,7 @@ class Receiver():
         self.virtual = virtual  
         if virtual:
             self.sdr = VirtualSDR()
+            self.sdr.rx_enabled_channels = [0]
         else:
             self.sdr = adi.ad9361('ip:192.168.2.1')
             self.sdr.rx_enabled_channels = [0]
@@ -218,7 +221,35 @@ class Receiver():
                 row.append(sample[1].tolist())
             writer.writerow(row)
             
+class Temperature():
+    def __init__(self, node_id, can_bus_manager = None): 
+        self.node_id = node_id
+        if can_bus_manager == None :
+            self.can_bus_manager = CANBusManager()
+        else:
+            self.can_bus_manager = can_bus_manager
+        self.can_bus_manager.add_handler(self)
+        self.temp_H = 0
+        self.temp_L = 0
+        self.output = 0
+        self.temp_board = 0
 
+    def can_handle_message(self, message: can.Message) -> bool:
+        """Check if this message belongs to this component"""
+        cob_id = message.arbitration_id
+        return cob_id in [0x100 + self.node_id, 0x200 + self.node_id, 0x300 + self.node_id]
+        
+    def handle_message(self, message: can.Message):
+        """Handle CAN message for this component"""
+        cob_id = message.arbitration_id
+        data = message.data
+        if cob_id == 0x100 + self.node_id:
+            self.temp_L = temp_conv(data[0] + data[1]*256)
+            self.temp_H = temp_conv(data[4] + data[5]*256)
+        elif cob_id == 0x200 + self.node_id:
+            self.temp_board = (data[4] + data[5]*256)
+        elif cob_id == 0x300 + self.node_id:
+            self.output = voltage_conv(data[0] + data[1]*256)
         
 
 class Dish():
@@ -230,10 +261,8 @@ class Dish():
         # self.observing_location = EarthLocation(lat='51.82465', lon='5.86923333', height=20*u.m) #east  
         self.observing_location = EarthLocation(lat='51.82466667', lon='5.86875', height=27*u.m) #west
         self.revolutions_to_increments = 65536
-        # self.dec_offset = -76.56 + 0.2
-        # self.ha_offset = 827 + 5.91 
-        self.dec_offset = -76.56 - 0.9
-        self.ha_offset = 827 - 1.75
+        self.dec_offset = -76.1
+        self.ha_offset = 618.5
 
         self.conversion_factor_HA = -2430/24
         self.conversion_factor_DEC = -870/360
@@ -244,7 +273,8 @@ class Dish():
             self.can_bus_manager = CANBusManager()
         else:
             self.can_bus_manager = can_bus_manager
-            
+        
+        self.temp_device = Temperature(self.dish_id + 5,self.can_bus_manager)
         self.request_queue = []
         self.drive_HA = ARS2108System(self.dish_id*2 + 1, self.can_bus_manager)
         self.drive_DEC = ARS2108System(self.dish_id*2 + 2, self.can_bus_manager)
@@ -267,7 +297,7 @@ class Dish():
         
     def coord_to_pos(self, coord,observing_time=None, transform=True):
         if observing_time == None:
-            observing_time = Time(datetime.datetime.now())
+            observing_time = Time(datetime.datetime.now(datetime.UTC))
         
         if transform:
             hadec = HADec(location=self.observing_location, obstime=observing_time)
@@ -290,9 +320,9 @@ class Dish():
         hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
         return hadec
         
-    def move_to(self, coord: SkyCoord, observing_time=None, follow = False):
+    def move_to(self, coord: SkyCoord, observing_time=None, follow = False , transform=True):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
-        posDEC, posHA = self.coord_to_pos(coord, observing_time, transform=True)
+        posDEC, posHA = self.coord_to_pos(coord, observing_time, transform)
         if follow:
             self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
         else:
@@ -336,7 +366,7 @@ class Dish():
                 self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
                 self.move_to(coord)
             else:
-                observing_time = Time(datetime.datetime.now())
+                observing_time = Time(datetime.datetime.now(datetime.UTC))
                 new_coord = tracking_func(observing_time)
                 self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
                 self.move_to(new_coord)
