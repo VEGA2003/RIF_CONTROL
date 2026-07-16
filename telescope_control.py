@@ -304,19 +304,38 @@ class Dish():
             coordHADec = coord.transform_to(hadec)
         else:
             coordHADec = coord
-        # coord = SkyCoord(ra, dec)
 
-        # lst = observing_time.sidereal_time('mean', longitude=self.observing_location)
-        # ha = (lst - coord.ra).wrap_at(12*u.hourangle)
-        posDEC = int((coordHADec.dec.value*self.conversion_factor_DEC + self.dec_offset)*self.revolutions_to_increments)
-        posHA = int((coordHADec.ha.value*self.conversion_factor_HA + self.ha_offset)*self.revolutions_to_increments)
+        max_ha =  6.1
+        max_dec = 135.30
+        min_dec = -32
+        min_ha = -5.37
+
+        ha = coordHADec.ha.hourangle
+        dec = coordHADec.dec.degree
+
+        if (ha < min_ha or ha > max_ha):
+            temp_ha =  ha - np.sign(ha) * 12
+            temp_dec = 180 - dec
+            if  (temp_ha > min_ha and temp_ha < max_ha) and temp_dec < max_dec:
+                ha = temp_ha
+                dec = temp_dec
+            else:
+                print("coordinate out of bounds")
+        elif dec < min_dec:
+            print("coordinate out of bounds")
+                
+
+        posDEC = int((dec*self.conversion_factor_DEC + self.dec_offset)*self.revolutions_to_increments)
+        posHA = int((ha*self.conversion_factor_HA + self.ha_offset)*self.revolutions_to_increments)
         
         return posDEC, posHA
     
     def pos_to_coord(self, posDEC,posHA, observing_time=None):
         coordDEC = ((posDEC/self.revolutions_to_increments) - self.dec_offset)/self.conversion_factor_DEC
         coordHA = ((posHA/self.revolutions_to_increments) - self.ha_offset)/self.conversion_factor_HA
-        # print(self.drive_DEC.target_position/self.revolutions_to_increments,posDEC/self.revolutions_to_increments, coordDEC)
+        if coordDEC > 90:
+            coordDEC = 180 - coordDEC
+            coordHA = coordHA - np.sign(coordHA)*12
         hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
         return hadec
         
