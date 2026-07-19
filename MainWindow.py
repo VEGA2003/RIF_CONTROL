@@ -206,6 +206,8 @@ class signalGUI(QMainWindow,):
         time_plot.setYRange(-1.1, 1.1)
         self.time_plot_curve_i = time_plot.plot([])
         self.time_plot_curve_q = time_plot.plot([])
+        self.total_signal = []
+        self.signal_time = []
 
         self.main_layout = QGridLayout()
         self.widget = QtWidgets.QWidget()
@@ -235,24 +237,35 @@ class signalGUI(QMainWindow,):
         freq_layout = QVBoxLayout()
         self.main_layout.addLayout(freq_layout, 2, 1)
         auto_range_button = QPushButton('Auto Range')
-        auto_range_button.clicked.connect(lambda : freq_plot.autoRange()) # lambda just means its an unnamed function
+        auto_range_button.clicked.connect(lambda : freq_plot.autoRange())
         freq_layout.addWidget(auto_range_button)
         self.start_button = QPushButton('START')
         freq_layout.addWidget(self.start_button)
 
-        # Layout container for waterfall related stuff
-        waterfall_layout = QHBoxLayout()
-        self.main_layout.addLayout(waterfall_layout, 3, 0)
 
-        # Waterfall plot
-        
-        waterfall = pg.PlotWidget(labels={'left': 'Signal', 'bottom': 'Time [seconds]'})
-        waterfall.setMouseEnabled(x=False, y=True)
+        # power plot
+        power_plot_layout = QHBoxLayout()
+        self.main_layout.addLayout(power_plot_layout, 3, 0)
+        power_plot = pg.PlotWidget(labels={'left': 'Signal', 'bottom': 'Time [seconds]'})
+        power_plot.setMouseEnabled(x=False, y=True)
         # time_plot.setYRange(-1.1, 1.1)
-        self.waterfall_curve = waterfall.plot([])
-        waterfall.setXRange(0, 3600)
-        waterfall.setYRange(0, 100000)
-        waterfall_layout.addWidget(waterfall)
+        self.power_curve = power_plot.plot([])
+        power_plot.setXRange(0, 3600)
+        power_plot.setYRange(0, 100000)
+        power_plot_layout.addWidget(power_plot)
+
+        power_plot_auto_range_layout = QVBoxLayout()
+        self.main_layout.addLayout(power_plot_auto_range_layout, 3, 1)
+        power_plot.getViewBox().enableAutoRange(axis=pg.ViewBox.XAxis)
+        auto_range_button = QPushButton('Auto Range')
+        def power_autorange():
+            power_plot.autoRange()
+            power_plot.getViewBox().enableAutoRange(axis=pg.ViewBox.XAxis)
+            
+        auto_range_button.clicked.connect(power_autorange) 
+        power_plot_auto_range_layout.addWidget(auto_range_button)
+
+
 
         # Freq slider with label, all units in kHz
         freq_slider = QSlider(Qt.Orientation.Horizontal)
@@ -316,10 +329,13 @@ class signalGUI(QMainWindow,):
     def freq_plot_callback(self,start_t,sample_rate, freq, signal, PSD_avg):
         f = np.linspace(freq - sample_rate/2.0, freq + sample_rate/2.0, self.fft_size) / 1e6
         self.freq_plot_curve.setData(f, PSD_avg)
+        self.total_signal.append(signal)
+        self.signal_time.append(start_t)
+        self.power_curve.setData(np.array(self.signal_time) - self.signal_time[0], self.total_signal)
 
-    def waterfall_plot_callback(self, PSD_total):
+    def power_plot_callback(self, PSD_total):
         data = PSD_total
-        self.waterfall_curve.setData(data)
+       
 
         # self.fig.setXRange(xdata[max(0, len(xdata)-600)], max(10, xdata[-1]))
 
