@@ -1,3 +1,4 @@
+from PySide6.QtCore import Signal, QObject
 from astropy.coordinates import EarthLocation,SkyCoord
 from astropy.time import Time
 from astropy import units as u
@@ -42,7 +43,17 @@ class Observation:
 
 
 class Telescope():
-    def __init__(self,telescope_type="real", bitrate: int = 500000, can_bus_manager= None):    
+    """
+    The class that manages the highest level functions.
+    """
+    def __init__(self,telescope_type:str="real", bitrate: int = 500000, can_bus_manager= None): 
+
+        """
+        Args:
+            telescope_type (str): "virtual" or "real"
+            bitrate (int): optional - bitrate of can connection
+            can_bus_manager (CANBusManager): distributes CAN bus messages to the appropriate handler
+        """
         # default observing location is the Huygens building :)
         self.observing_location = EarthLocation(lat='51.816694', lon='5.866694', height=20*u.m)
         self.revolutions_to_increments = 65536
@@ -72,11 +83,10 @@ class Telescope():
                 "no receiver connected"
                 
         self.request_queue = []
-        # self.drives = [self.drive_HA, self.drive_DEC]
-        # self.drives = [self.drive_HA]
         
-        self.dish_east = Dish(0, self.can_bus_manager)
-        self.dish_west = Dish(1, self.can_bus_manager)
+        self.dish_west = Dish(0, self.can_bus_manager)
+        self.dish_east = Dish(1, self.can_bus_manager)
+
         
         self.dishes = [self.dish_east, self.dish_west]
         self.dishes_in_position = 0
@@ -183,8 +193,11 @@ class Telescope():
             return self.state != ComponentState.IDLE or len(self.request_queue) > 0    
             
 
-class Receiver():
+class Receiver(QObject):
+    sample_completed = Signal(float, float, float,float, np.ndarray)
+    sampling = Signal(np.ndarray)
     def __init__(self, virtual=False): 
+        super().__init__()
         self.virtual = virtual  
         if virtual:
             self.sdr = VirtualSDR()
@@ -195,31 +208,35 @@ class Receiver():
             self.sdr.gain_control_mode_chan0 = 'manual'
             # self.sdr.gain_control_mode_chan1 = 'manual'
             
-        self.sdr.rx_hardwaregain_chan0 = 10.0 # dB
+        self.sdr.rx_hardwaregain_chan0 = 65.0 # dB
         # self.sdr.rx_hardwaregain_chan1 = 10.0 # dB
         self.sdr.rx_lo = int(1420e6) # Hz
-        sample_rate = 4e6
+        sample_rate = 5e6
         self.sdr.sample_rate = int(sample_rate) # Hz
-        self.sdr.rx_rf_bandwidth = int(sample_rate*0.8) # filter width, just set it to the same as sample rate for now
+        self.sdr.rx_rf_bandwidth = int(sample_rate) # filter width, just set it to the same as sample rate for now
         self.sdr.rx_buffer_size = 4096
+        self.fft_size = 4096
         
-    def sample(self, output_path="output/data.csv", record_all_data= False):
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        if not os.path.exists(output_path):
-            with open(output_path, 'w', newline='') as csvfile:
-                writer = csv.writer(csvfile, delimiter=',')
-                if record_all_data:
-                    writer.writerow(["time_stamp", "channel_0", "channel_1"])
-            
-        with open(output_path, 'a', newline='') as csvfile:
-            now = str(datetime.datetime.now().time())
-            writer = csv.writer(csvfile, delimiter=',')
-            row = [now]
+    def sample(self, integration_time:int =5):
+        start_t = time.time()
+        now = 0
+        runs = 0
+        power = 0
+        PSD_avg = 0
+        while now < start_t +integration_time:
             sample = self.sdr.rx()
-            if record_all_data:
-                row.append(sample[0].tolist())
-                row.append(sample[1].tolist())
-            writer.writerow(row)
+            self.sampling.emit(sample)
+            PSD_avg += 10.0*np.log10(np.abs(np.fft.fftshift(np.fft.fft(sample)))**2/self.fft_size)
+            power += np.sum(np.abs(np.array(sample)**2))
+            runs += 1
+            now = time.time()
+        
+        PSD_avg = PSD_avg/runs
+        power = power/runs
+        freq = self.sdr.rx_lo
+        sample_rate = self.sdr.sample_rate
+        self.sample_completed.emit(start_t, sample_rate,freq, power,  PSD_avg)
+        return start_t,sample_rate ,freq, power,  PSD_avg
             
 class Temperature():
     def __init__(self, node_id, can_bus_manager = None): 
@@ -264,6 +281,11 @@ class Dish():
         self.dec_offset = -76.1
         self.ha_offset = 618.5
 
+        self.max_ha =  6.1
+        self.max_dec = 135.30
+        self.min_dec = -32
+        self.min_ha = -5.37
+
         self.conversion_factor_HA = -2430/24
         self.conversion_factor_DEC = -870/360
         self.earth_speed = int(self.conversion_factor_HA/3600 * self.revolutions_to_increments)  #increments a second
@@ -295,33 +317,42 @@ class Dish():
         self.process_thread = threading.Thread(target=self._process_loop, daemon=True)
         self.process_thread.start()
         
-    def coord_to_pos(self, coord,observing_time=None, transform=True):
+    def coord_to_pos(self, coord:SkyCoord, observing_time:Time=None):
+        """
+        Args:
+            coord (SkyCoord): Coordinate to observe
+            observing_time (Time): optional - Observing time to use for coordinate calculation 
+                                  by default current time is used
+        Returns:
+            posDEC, posHA : Position of the drives in increments corresponding to the coordinate
+        """
         if observing_time == None:
             observing_time = Time(datetime.datetime.now(datetime.UTC))
         
-        if transform:
-            hadec = HADec(location=self.observing_location, obstime=observing_time)
-            coordHADec = coord.transform_to(hadec)
-        else:
+        if coord.frame.name == "hadec":
             coordHADec = coord
 
-        max_ha =  6.1
-        max_dec = 135.30
-        min_dec = -32
-        min_ha = -5.37
+        else:
+            hadec = HADec(location=self.observing_location, obstime=observing_time)
+            coordHADec = coord.transform_to(hadec)
+
+        # max_ha =  6.1
+        # max_dec = 135.30
+        # min_dec = -32
+        # min_ha = -5.37
 
         ha = coordHADec.ha.hourangle
         dec = coordHADec.dec.degree
 
-        if (ha < min_ha or ha > max_ha):
+        if (ha < self.min_ha or ha > self.max_ha):
             temp_ha =  ha - np.sign(ha) * 12
             temp_dec = 180 - dec
-            if  (temp_ha > min_ha and temp_ha < max_ha) and temp_dec < max_dec:
+            if  (temp_ha > self.min_ha and temp_ha < self.max_ha) and temp_dec < self.max_dec:
                 ha = temp_ha
                 dec = temp_dec
             else:
                 print("coordinate out of bounds")
-        elif dec < min_dec:
+        elif dec < self.min_dec:
             print("coordinate out of bounds")
                 
 
@@ -339,9 +370,9 @@ class Dish():
         hadec = HADec(ha=Angle(coordHA * u.hourangle), dec= Angle(coordDEC * u.degree) ,location=self.observing_location, obstime=observing_time)
         return hadec
         
-    def move_to(self, coord: SkyCoord, observing_time=None, follow = False , transform=True):
+    def move_to(self, coord: SkyCoord, observing_time=None, follow = False):
         print(f"{self.drive_DEC.node_id} and {self.drive_HA.node_id} are moving!")
-        posDEC, posHA = self.coord_to_pos(coord, observing_time, transform)
+        posDEC, posHA = self.coord_to_pos(coord, observing_time)
         if follow:
             self.drive_HA.sdo_manager.write_sdo(self.drive_HA.node_id,0x6082, 0x00, self.earth_speed, 4)
         else:
@@ -370,11 +401,6 @@ class Dish():
         print(bcolors.OKBLUE, f"waiting for {wait_time} seconds", bcolors.ENDC)
         time.sleep(wait_time)
         pass
-    
-    # def track(self, ra: str , dec: str, tracking_time: int):
-    #     self.move_to(ra , dec)
-    #     self.drive_HA.set_velocity(self.earth_speed)
-    #     self.wait(tracking_time)
 
     def track(self, coord: SkyCoord, tracking_time: int, tracking_func= None):
         elapsed_time = 0
